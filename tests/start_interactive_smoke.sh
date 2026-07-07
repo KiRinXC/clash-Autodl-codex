@@ -150,7 +150,7 @@ EOF
 
 grep -q 'proxy-status' <<<"$output"
 grep -q 'codex-use-in' <<<"$output"
-grep -q 'source ~/.codex/clash-codex-autodl.sh' <<<"$output"
+grep -q '\[WARN\].*当前终端不会自动刷新；请重新打开一个终端' <<<"$output"
 grep -q '请输入 Clash/Mihomo 订阅地址' "$work_dir/start.sh"
 grep -q '请输入国内直连中转站地址' "$work_dir/start.sh"
 grep -q '请输入国外代理中转站地址' "$work_dir/start.sh"

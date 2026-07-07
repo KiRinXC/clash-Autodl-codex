@@ -216,6 +216,19 @@ proxy_env_is_active() {
   [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${HTTPS_PROXY:-}" ]
 }
 
+proxy_url_for_compare() {
+  local value="${1:-}"
+  value="${value%/}"
+  printf '%s\n' "$value"
+}
+
+proxy_env_value_matches_configured_proxy() {
+  local value="${1:-}"
+  local configured="${CODEX_PROXY_URL:-$DEFAULT_PROXY_URL}"
+
+  [ "$(proxy_url_for_compare "$value")" = "$(proxy_url_for_compare "$configured")" ]
+}
+
 local_proxy_is_listening() {
   local proxy_url="${1:-$CODEX_PROXY_URL}"
   local host_port host port python_bin
@@ -264,8 +277,163 @@ PY
   curl -sS --max-time 2 -x "$proxy_url" https://example.com >/dev/null 2>&1
 }
 
+mihomo_process_text_matches() {
+  awk '
+    function matches_mihomo(text) {
+      return text ~ /(^|[[:space:]\/])(mihomo|mihomo-linux[^[:space:]\/]*|clash|clash-linux[^[:space:]\/]*)($|[[:space:]])/
+    }
+    { if (matches_mihomo($0)) found = 1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+mihomo_pid_is_running() {
+  local pid_file="${1:-$CODEX_AUTODL_REPO_ROOT/mihomo.pid}"
+  local pid process_text
+
+  if [ ! -f "$pid_file" ]; then
+    return 1
+  fi
+
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  process_text="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+  [ -n "$process_text" ] || return 1
+  printf '%s\n' "$process_text" | mihomo_process_text_matches
+}
+
 proxy_process_is_running() {
-  ps -eo comm= 2>/dev/null | grep -Eq '^(mihomo|mihomo-linux|clash|clash-linux)'
+  {
+    ps -eo comm=,args= 2>/dev/null ||
+      ps -ef 2>/dev/null ||
+      ps 2>/dev/null
+  } | mihomo_process_text_matches
+}
+
+local_proxy_is_ready() {
+  local proxy_url="${1:-$CODEX_PROXY_URL}"
+
+  local_proxy_is_listening "$proxy_url" && {
+    mihomo_pid_is_running || proxy_process_is_running
+  }
+}
+
+clear_dead_local_proxy_env() {
+  local name value cleared
+  cleared="false"
+
+  if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    return 0
+  fi
+
+  for name in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do
+    value="${!name:-}"
+    if [ -n "$value" ] && proxy_env_value_matches_configured_proxy "$value"; then
+      unset "$name"
+      cleared="true"
+    fi
+  done
+
+  if [ "$cleared" = "true" ]; then
+    if ! proxy_env_is_active; then
+      unset no_proxy NO_PROXY
+    fi
+    log_warn "检测到代理环境指向 $CODEX_PROXY_URL，但 Mihomo 未运行或代理端口不可用；已临时清理失效代理环境"
+  fi
+}
+
+mihomo_arch_name() {
+  local machine
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64 | amd64) echo "amd64" ;;
+    aarch64 | arm64) echo "arm64" ;;
+    armv7*) echo "armv7" ;;
+    *) return 1 ;;
+  esac
+}
+
+mihomo_binary_path() {
+  local arch candidate
+  arch="$(mihomo_arch_name)" || return 1
+
+  for candidate in \
+    "$CODEX_AUTODL_REPO_ROOT/bin/mihomo-linux-$arch" \
+    "$CODEX_AUTODL_REPO_ROOT/bin/mihomo" \
+    "$CODEX_AUTODL_REPO_ROOT/bin/clash"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+start_existing_mihomo() {
+  local config_dir config_file log_dir log_file pid_file mihomo_bin mihomo_pid wait_seconds
+
+  if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    return 0
+  fi
+
+  config_dir="$CODEX_AUTODL_REPO_ROOT/conf"
+  config_file="$config_dir/config.yaml"
+  log_dir="$CODEX_AUTODL_REPO_ROOT/logs"
+  log_file="$log_dir/mihomo.log"
+  pid_file="$CODEX_AUTODL_REPO_ROOT/mihomo.pid"
+
+  if [ ! -f "$config_file" ]; then
+    log_warn "Mihomo 配置不存在: $config_file"
+    return 1
+  fi
+
+  mihomo_bin="$(mihomo_binary_path)" || {
+    log_warn "Mihomo 二进制不存在，请先运行 bash $CODEX_AUTODL_REPO_ROOT/start.sh --reconfigure-clash"
+    return 1
+  }
+
+  mkdir -p "$log_dir"
+
+  if [ -f "$pid_file" ]; then
+    mihomo_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [ -n "${mihomo_pid:-}" ] && kill -0 "$mihomo_pid" >/dev/null 2>&1; then
+      log_warn "Mihomo 进程存在但未监听 $CODEX_PROXY_URL，正在重启"
+      kill "$mihomo_pid" >/dev/null 2>&1 || true
+      sleep 1
+      if kill -0 "$mihomo_pid" >/dev/null 2>&1; then
+        kill -9 "$mihomo_pid" >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+
+  log_info "正在启动 Mihomo"
+  nohup "$mihomo_bin" -d "$config_dir" > "$log_file" 2>&1 </dev/null &
+  mihomo_pid="$!"
+  echo "$mihomo_pid" > "$pid_file"
+
+  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-10}"
+  for _ in $(seq 1 "$wait_seconds"); do
+    if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
+      log_warn "Mihomo 在打开代理端口前已退出"
+      tail -n 40 "$log_file" >&2 || true
+      return 1
+    fi
+
+    if local_proxy_is_listening "$CODEX_PROXY_URL"; then
+      log_ok "Mihomo 正在监听 $CODEX_PROXY_URL"
+      return 0
+    fi
+    sleep 1
+  done
+
+  log_warn "Mihomo 未能监听 $CODEX_PROXY_URL"
+  tail -n 40 "$log_file" >&2 || true
+  return 1
 }
 
 require_command() {
@@ -285,6 +453,12 @@ set_proxy_env() {
 }
 
 enable_proxy_env() {
+  if ! start_existing_mihomo; then
+    clear_proxy_env
+    log_warn "代理未开启: Mihomo 未监听 $CODEX_PROXY_URL"
+    return 1
+  fi
+
   set_proxy_env
   log_ok "代理已开启: $CODEX_PROXY_URL"
 }
@@ -346,7 +520,11 @@ function proxy-status {
   load_project_config
 
   if proxy_env_is_active; then
-    log_ok "代理: 已开启"
+    if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+      log_ok "代理: 已开启"
+    else
+      log_warn "代理: 环境变量已开启，但 Mihomo 未运行或代理端口不可用"
+    fi
   else
     log_warn "代理: 未开启"
   fi
@@ -357,7 +535,13 @@ function proxy-status {
     log_warn "Mihomo: 未运行"
   fi
   if python_command >/dev/null 2>&1; then
-    log_ok "当前节点: $(current_proxy_node)"
+    local node
+    node="$(current_proxy_node)"
+    if [ "$node" = "unknown" ]; then
+      log_warn "当前节点: unknown"
+    else
+      log_ok "当前节点: $node"
+    fi
   else
     log_warn "当前节点: 未检测，系统缺少可用的 Python"
   fi
@@ -626,21 +810,24 @@ startup_proxy_status() {
   load_project_config
 
   if [ "${AUTO_PROXY_ON_SHELL_START}" = "true" ]; then
-    set_proxy_env
+    enable_proxy_env || true
   else
     clear_proxy_env
-  fi
-
-  if proxy_env_is_active; then
-    log_ok "代理: 已开启"
-  else
     log_warn "代理: 未开启"
   fi
 
-  if python_command >/dev/null 2>&1; then
-    log_ok "当前节点: $(current_proxy_node)"
-  else
+  if proxy_env_is_active && python_command >/dev/null 2>&1; then
+    local node
+    node="$(current_proxy_node)"
+    if [ "$node" = "unknown" ]; then
+      log_warn "当前节点: unknown"
+    else
+      log_ok "当前节点: $node"
+    fi
+  elif proxy_env_is_active; then
     log_warn "当前节点: 未检测，缺少可用的 python3/python"
+  else
+    log_warn "当前节点: 未检测，代理未开启"
   fi
 }
 
@@ -1025,6 +1212,7 @@ codex_smoke_log_summary() {
 
 codex_smoke_test() {
   local codex_status
+  local had_errexit
   local smoke_timeout="${CODEX_SMOKE_TIMEOUT:-180}"
   local quiet="${CODEX_SMOKE_TEST_QUIET:-false}"
   local tmp_log
@@ -1034,6 +1222,10 @@ codex_smoke_test() {
   require_command codex || return 1
   tmp_log="$(mktemp)"
   tmp_output="$(mktemp)"
+  had_errexit="false"
+  case "$-" in
+    *e*) had_errexit="true" ;;
+  esac
 
   if command -v timeout >/dev/null 2>&1; then
     set +e
@@ -1041,13 +1233,17 @@ codex_smoke_test() {
       codex exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
         </dev/null > "$tmp_log" 2>&1
     codex_status="$?"
-    set -e
   else
     set +e
     codex exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
       </dev/null > "$tmp_log" 2>&1
     codex_status="$?"
+  fi
+
+  if [ "$had_errexit" = "true" ]; then
     set -e
+  else
+    set +e
   fi
 
   cp "$tmp_log" /tmp/codex-bootstrap-smoke.log 2>/dev/null || true

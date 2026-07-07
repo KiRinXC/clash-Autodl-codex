@@ -27,15 +27,23 @@ jobs:
             uninstall_codex_bootstrap.sh \
             converter.sh \
             start.sh \
+            tests/codex_verify_no_errexit_smoke.sh \
             tests/codex_relay_status_smoke.sh \
             tests/command_boundary_smoke.sh \
             tests/config_persistence_smoke.sh \
+            tests/proxy_auto_start_smoke.sh \
             tests/proxy_commands_smoke.sh \
+            tests/proxy_on_dead_mihomo_smoke.sh \
+            tests/proxy_on_rejects_stray_listener_smoke.sh \
             tests/proxy_pick_smoke.sh \
             tests/proxy_status_smoke.sh \
-            tests/setup_mihomo_env_smoke.sh \
+            tests/setup_mihomo_config_smoke.sh \
+            tests/setup_mihomo_ignores_dead_proxy_smoke.sh \
             tests/setup_mihomo_subscription_only_smoke.sh \
+            tests/shell_hook_starts_mihomo_smoke.sh \
+            tests/shell_hook_summary_smoke.sh \
             tests/start_interactive_smoke.sh \
+            tests/terminal_only_config_smoke.sh \
             tests/verify_wrapper_smoke.sh
 
       - name: ShellCheck 检查
@@ -48,15 +56,23 @@ jobs:
             uninstall_codex_bootstrap.sh \
             converter.sh \
             start.sh \
+            tests/codex_verify_no_errexit_smoke.sh \
             tests/codex_relay_status_smoke.sh \
             tests/command_boundary_smoke.sh \
             tests/config_persistence_smoke.sh \
+            tests/proxy_auto_start_smoke.sh \
             tests/proxy_commands_smoke.sh \
+            tests/proxy_on_dead_mihomo_smoke.sh \
+            tests/proxy_on_rejects_stray_listener_smoke.sh \
             tests/proxy_pick_smoke.sh \
             tests/proxy_status_smoke.sh \
-            tests/setup_mihomo_env_smoke.sh \
+            tests/setup_mihomo_config_smoke.sh \
+            tests/setup_mihomo_ignores_dead_proxy_smoke.sh \
             tests/setup_mihomo_subscription_only_smoke.sh \
+            tests/shell_hook_starts_mihomo_smoke.sh \
+            tests/shell_hook_summary_smoke.sh \
             tests/start_interactive_smoke.sh \
+            tests/terminal_only_config_smoke.sh \
             tests/verify_wrapper_smoke.sh
 
       - name: 帮助命令检查
@@ -67,22 +83,27 @@ jobs:
           bash uninstall_codex_bootstrap.sh --help
           bash converter.sh --help
           bash start.sh --help
+          bash tests/codex_verify_no_errexit_smoke.sh
           bash tests/proxy_commands_smoke.sh
           bash tests/proxy_pick_smoke.sh
           bash tests/proxy_status_smoke.sh
           bash tests/codex_relay_status_smoke.sh
           bash tests/config_persistence_smoke.sh
           bash tests/command_boundary_smoke.sh
-          bash tests/setup_mihomo_env_smoke.sh
+          bash tests/proxy_auto_start_smoke.sh
+          bash tests/proxy_on_dead_mihomo_smoke.sh
+          bash tests/proxy_on_rejects_stray_listener_smoke.sh
+          bash tests/setup_mihomo_config_smoke.sh
+          bash tests/setup_mihomo_ignores_dead_proxy_smoke.sh
           bash tests/setup_mihomo_subscription_only_smoke.sh
+          bash tests/shell_hook_starts_mihomo_smoke.sh
+          bash tests/shell_hook_summary_smoke.sh
           bash tests/start_interactive_smoke.sh
+          bash tests/terminal_only_config_smoke.sh
           bash tests/verify_wrapper_smoke.sh
 
       - name: 配置生成检查
         run: |
-          grep -qx "export CODEX_DOMESTIC_BASE_URL=''" .env.example
-          grep -qx "export CODEX_OVERSEAS_BASE_URL=''" .env.example
-
           tmp_home="$(mktemp -d)"
           tmp_state="$(mktemp -d)"
           cat > "$tmp_state/config.sh" <<'EOF'
@@ -90,7 +111,7 @@ jobs:
           CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
           CODEX_ACTIVE_RELAY='domestic'
           EOF
-          HOME="$tmp_home" CODEX_AUTODL_CONFIG_DIR="$tmp_state" bash -c 'source lib/codex_common.sh; codex_use_domestic'
+          HOME="$tmp_home" CODEX_AUTODL_CONFIG_DIR="$tmp_state" bash -c 'source lib/codex_common.sh; codex-use-in'
           grep -q 'model_provider = "OpenAI"' "$tmp_home/.codex/config.toml"
           grep -q 'https://domestic.example.invalid/api' "$tmp_home/.codex/config.toml"
 

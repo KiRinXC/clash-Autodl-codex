@@ -329,6 +329,7 @@ fi
 
 env_file="${1:-.env}"
 load_project_config "$env_file"
+clear_dead_local_proxy_env
 
 if [ -z "${CLASH_URL:-}" ]; then
   log_error "CLASH_URL 为空。请先在目标主机的 $env_file 中填写 Clash 订阅地址。"

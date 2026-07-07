@@ -15,10 +15,9 @@
 git clone https://github.com/KiRinXC/clash-codex-autodl.git
 cd clash-codex-autodl
 bash start.sh
-source ~/.codex/clash-codex-autodl.sh
 ```
 
-最后一行用于让当前终端立即识别 `proxy-*` 和 `codex-*` 命令；新开的终端会自动加载。
+安装完成后，脚本会用 `[WARN]` 提醒你重新打开一个终端。新终端会自动识别 `proxy-*` 和 `codex-*` 命令，并恢复代理状态。
 
 脚本会依次提示你输入：
 
@@ -53,7 +52,7 @@ source ~/.codex/clash-codex-autodl.sh
 
 ## 代理命令
 
-代理命令只控制当前 shell 的代理环境变量和 Mihomo 节点，不会切换 Codex 中转站。
+代理命令控制当前 shell 的代理环境变量、Mihomo 进程和 Mihomo 节点，不会切换 Codex 中转站。
 
 ```bash
 proxy-on
@@ -62,7 +61,7 @@ proxy-pick
 proxy-status
 ```
 
-- `proxy-on`：为当前 shell 设置 `http_proxy`、`https_proxy` 等代理环境变量。
+- `proxy-on`：确认 Mihomo 已监听代理端口；必要时尝试用现有配置启动 Mihomo，然后为当前 shell 设置 `http_proxy`、`https_proxy` 等代理环境变量。Mihomo 未能启动时不会留下失效的代理变量。
 - `proxy-off`：移除当前 shell 的代理环境变量。
 - `proxy-pick`：交互式切换 `CodexProxy` 选择组里的节点。
 - `proxy-status`：显示代理是否开启、Mihomo 是否运行、代理地址和当前节点。
@@ -107,21 +106,21 @@ codex-verify
 
 ## 新终端自动检查
 
-初始化完成后，新开的终端会自动加载：
+初始化完成后，新开的终端会通过 `~/.bashrc` 自动加载启动钩子：
 
 ```bash
-source ~/.codex/clash-codex-autodl.sh
+[ -f "$HOME/.codex/clash-codex-autodl.sh" ] && . "$HOME/.codex/clash-codex-autodl.sh"
 ```
 
 启动钩子会显示：
 
 ```text
-[OK] 代理: 已开启
+[OK] 代理已开启: http://127.0.0.1:7890
 [OK] 当前节点: <node name>
 [OK] Codex 中转站: domestic <url>
 ```
 
-代理状态会被持久化；新终端默认恢复开启，只有执行 `proxy-off` 后才会关闭。
+代理状态会被持久化；新终端默认尝试恢复开启，只有执行 `proxy-off` 后才会关闭。如果 Mihomo 没能启动，新终端会清理失效代理环境并提示原因。
 新终端不会自动运行耗时的 Codex 冒烟测试；需要确认 Codex 是否可用时，手动执行 `codex-verify`。
 
 ## 重新配置

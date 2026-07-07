@@ -139,5 +139,5 @@ main() {
 
 main "$@"
 if [ "${show_source_hint:-false}" = "true" ]; then
-  log_info "要在当前终端立即使用命令，请运行: source ~/.codex/clash-codex-autodl.sh"
+  log_warn "当前终端不会自动刷新；请重新打开一个终端，proxy-* 和 codex-* 命令会自动生效。"
 fi

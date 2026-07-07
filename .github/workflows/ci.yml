@@ -86,10 +86,10 @@ jobs:
           tmp_home="$(mktemp -d)"
           tmp_state="$(mktemp -d)"
           cat > "$tmp_state/config.sh" <<'EOF'
-CODEX_DOMESTIC_BASE_URL='https://domestic.example.invalid/api'
-CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
-CODEX_ACTIVE_RELAY='domestic'
-EOF
+          CODEX_DOMESTIC_BASE_URL='https://domestic.example.invalid/api'
+          CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
+          CODEX_ACTIVE_RELAY='domestic'
+          EOF
           HOME="$tmp_home" CODEX_AUTODL_CONFIG_DIR="$tmp_state" bash -c 'source lib/codex_common.sh; codex_use_domestic'
           grep -q 'model_provider = "OpenAI"' "$tmp_home/.codex/config.toml"
           grep -q 'https://domestic.example.invalid/api' "$tmp_home/.codex/config.toml"

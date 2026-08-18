@@ -39,7 +39,7 @@ if [ "${1:-}" = "eval" ] && [ "${2:-}" = "-i" ]; then
   {
     printf 'mixed-port: %s\n' "${CODEX_PROXY_PORT:-}"
     printf 'external-controller: %s\n' "${CODEX_MIHOMO_CONTROLLER_BIND:-}"
-    printf 'overseas-host: %s\n' "${CODEX_OVERSEAS_HOST:-}"
+    printf 'proxy-group: %s\n' "${CODEX_PROXY_GROUP_NAME:-}"
   } > "$config_file"
   exit 0
 fi
@@ -50,7 +50,7 @@ if [ "${1:-}" = "eval" ]; then
     '.proxies | length')
       exit 0
       ;;
-    *CodexProxy*length*)
+    *CODEX_PROXY_GROUP_NAME*length*)
       printf '1\n'
       exit 0
       ;;
@@ -124,6 +124,6 @@ PATH="$fake_bin:$PATH" EXPECTED_PROXY_PORT=17890 bash "$work_dir/setup_mihomo.sh
 
 grep -qx 'mixed-port: 17890' "$work_dir/conf/config.yaml"
 grep -qx 'external-controller: 127.0.0.1:16006' "$work_dir/conf/config.yaml"
-grep -q '^overseas-host:' "$work_dir/conf/config.yaml"
+grep -qx 'proxy-group: CodexProxy' "$work_dir/conf/config.yaml"
 geoip_size="$(wc -c < "$work_dir/conf/geoip.metadb" | tr -d '[:space:]')"
 [ "$geoip_size" -ge 5242880 ]

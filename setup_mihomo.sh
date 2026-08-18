@@ -16,10 +16,8 @@ YQ_BINARY="$BIN_DIR/yq"
 MIHOMO_BINARY=""
 
 GITHUB_MIRRORS=(
-  "ghfast.top/https://github.com"
   "github.com"
-  "kkgithub.com"
-  "gitclone.com"
+  "ghfast.top/https://github.com"
 )
 
 usage() {
@@ -46,7 +44,7 @@ download_github_file() {
   for mirror in "${GITHUB_MIRRORS[@]}"; do
     url="https://${mirror}${github_path}"
     log_info "正在从 $mirror 下载 $description"
-    if curl -fL --retry 3 --connect-timeout 15 --max-time 120 -o "$output_file" "$url"; then
+    if curl -fL -C - --retry 2 --connect-timeout 10 --max-time 180 -o "$output_file" "$url"; then
       if [ -s "$output_file" ]; then
         log_ok "$description 下载完成"
         return 0
@@ -211,91 +209,60 @@ convert_if_needed() {
   return 1
 }
 
-inject_codex_rules() {
+inject_proxy_settings() {
   local proxy_count
   local proxy_port
   local controller_bind
-  local overseas_host=""
 
-  log_info "正在注入 Mihomo 端口、控制器和 CodexProxy 选择组"
+  log_info "正在配置 Mihomo 端口、控制器和代理选择组"
   proxy_port="$(url_port_from_url "$CODEX_PROXY_URL")" || return 1
   controller_bind="$(controller_bind_from_url "$CODEX_MIHOMO_CONTROLLER_URL")" || return 1
 
-  if [ -n "${CODEX_OVERSEAS_BASE_URL:-}" ]; then
-    overseas_host="$(url_hostname "$CODEX_OVERSEAS_BASE_URL")" || {
-      log_warn "无法解析 CODEX_OVERSEAS_BASE_URL 的 host，跳过 Mihomo 海外规则更新"
-      overseas_host=""
-    }
-  fi
+  CODEX_PROXY_PORT="$proxy_port" \
+  CODEX_MIHOMO_CONTROLLER_BIND="$controller_bind" \
+  CODEX_PROXY_GROUP_NAME="$CODEX_PROXY_GROUP" "$YQ_BINARY" eval -i '
+    ."mixed-port" = (strenv(CODEX_PROXY_PORT) | tonumber) |
+    .mode = "rule" |
+    ."external-controller" = strenv(CODEX_MIHOMO_CONTROLLER_BIND) |
+    ."external-ui" = "dashboard" |
+    .rules = (.rules // []) |
+    ."proxy-groups" = (
+      [{
+        "name": strenv(CODEX_PROXY_GROUP_NAME),
+        "type": "select",
+        "proxies": ((.proxies // []) | map(.name))
+      }] +
+      ((."proxy-groups" // []) | map(select(.name != strenv(CODEX_PROXY_GROUP_NAME))))
+    )
+  ' "$CONFIG_FILE"
 
-  if [ -n "$overseas_host" ]; then
-    CODEX_PROXY_PORT="$proxy_port" \
-    CODEX_MIHOMO_CONTROLLER_BIND="$controller_bind" \
-    CODEX_OVERSEAS_HOST="$overseas_host" "$YQ_BINARY" eval -i '
-      ."mixed-port" = (strenv(CODEX_PROXY_PORT) | tonumber) |
-      .mode = "rule" |
-      ."external-controller" = strenv(CODEX_MIHOMO_CONTROLLER_BIND) |
-      ."external-ui" = "dashboard" |
-      .rules = (
-        ["DOMAIN," + strenv(CODEX_OVERSEAS_HOST) + ",CodexProxy"] +
-        ((.rules // []) | map(select(. != ("DOMAIN," + strenv(CODEX_OVERSEAS_HOST) + ",CodexProxy"))))
-      ) |
-      ."proxy-groups" = (
-        [{
-          "name": "CodexProxy",
-          "type": "select",
-          "proxies": ((.proxies // []) | map(.name))
-        }] +
-        ((."proxy-groups" // []) | map(select(.name != "CodexProxy")))
-      )
-    ' "$CONFIG_FILE"
-  else
-    CODEX_PROXY_PORT="$proxy_port" \
-    CODEX_MIHOMO_CONTROLLER_BIND="$controller_bind" "$YQ_BINARY" eval -i '
-      ."mixed-port" = (strenv(CODEX_PROXY_PORT) | tonumber) |
-      .mode = "rule" |
-      ."external-controller" = strenv(CODEX_MIHOMO_CONTROLLER_BIND) |
-      ."external-ui" = "dashboard" |
-      .rules = (.rules // []) |
-      ."proxy-groups" = (
-        [{
-          "name": "CodexProxy",
-          "type": "select",
-          "proxies": ((.proxies // []) | map(.name))
-        }] +
-        ((."proxy-groups" // []) | map(select(.name != "CodexProxy")))
-      )
-    ' "$CONFIG_FILE"
-  fi
-
-  proxy_count="$("$YQ_BINARY" eval '."proxy-groups"[] | select(.name == "CodexProxy") | (.proxies // []) | length' "$CONFIG_FILE" 2>/dev/null || echo 0)"
+  proxy_count="$(CODEX_PROXY_GROUP_NAME="$CODEX_PROXY_GROUP" "$YQ_BINARY" eval '."proxy-groups"[] | select(.name == strenv(CODEX_PROXY_GROUP_NAME)) | (.proxies // []) | length' "$CONFIG_FILE" 2>/dev/null || echo 0)"
   if [ "${proxy_count:-0}" -eq 0 ]; then
     log_error "转换后的订阅中没有找到可用代理节点"
     return 1
   fi
 
-  if [ -n "$overseas_host" ]; then
-    log_ok "已注入 CodexProxy 选择组和中转规则: $overseas_host"
-  else
-    log_ok "已注入 CodexProxy 选择组；Codex 中转规则将在配置中转站后应用"
-  fi
+  log_ok "已配置代理选择组: $CODEX_PROXY_GROUP"
 }
 
 start_mihomo() {
   local mihomo_bin="$1"
   local mihomo_pid
   local old_pids
+  local -a old_pid_array
 
   mkdir -p "$LOG_DIR"
 
   old_pids="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /^(mihomo|mihomo-linux|clash|clash-linux)/ {print $1}' || true)"
   if [ -n "$old_pids" ]; then
     log_warn "重启前正在停止已有的 Mihomo/Clash 进程"
-    kill $old_pids >/dev/null 2>&1 || true
+    read -r -a old_pid_array <<< "$old_pids"
+    kill "${old_pid_array[@]}" >/dev/null 2>&1 || true
     sleep 2
     old_pids="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /^(mihomo|mihomo-linux|clash|clash-linux)/ {print $1}' || true)"
     if [ -n "$old_pids" ]; then
-      kill -9 $old_pids >/dev/null 2>&1 || true
+      read -r -a old_pid_array <<< "$old_pids"
+      kill -9 "${old_pid_array[@]}" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -339,7 +306,7 @@ fi
 install_yq
 download_subscription
 convert_if_needed
-inject_codex_rules
+inject_proxy_settings
 install_mihomo
 install_geoip_metadb
 start_mihomo "$MIHOMO_BINARY"

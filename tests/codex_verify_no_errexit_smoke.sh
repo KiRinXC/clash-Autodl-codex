@@ -14,9 +14,6 @@ trap cleanup EXIT
 mkdir -p "$tmp_state" "$fake_bin"
 
 cat > "$tmp_state/config.sh" <<'EOF'
-CODEX_DOMESTIC_BASE_URL='https://domestic.example.invalid/api'
-CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
-CODEX_ACTIVE_RELAY='domestic'
 CODEX_PROXY_URL='http://127.0.0.1:17900'
 CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:16900'
 CODEX_PROXY_GROUP='CodexProxy'

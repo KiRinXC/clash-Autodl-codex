@@ -3,14 +3,10 @@
 set -o pipefail
 
 DEFAULT_CLASH_URL=""
-DEFAULT_DOMESTIC_BASE_URL=""
-DEFAULT_OVERSEAS_BASE_URL=""
 DEFAULT_PROXY_URL="http://127.0.0.1:7890"
 DEFAULT_MIHOMO_CONTROLLER_URL="http://127.0.0.1:6006"
 DEFAULT_CODEX_PROXY_GROUP="CodexProxy"
 DEFAULT_CODEX_MODEL="gpt-5.4"
-DEFAULT_ACTIVE_RELAY=""
-DEFAULT_AUTO_CODEX_CHECK_ON_SHELL_START="false"
 DEFAULT_AUTO_PROXY_ON_SHELL_START="true"
 
 if [ -z "${CLASH_CODEX_AUTODL_REPO_ROOT:-}" ] && [ -n "${CODEX_AUTODL_REPO_ROOT:-}" ]; then
@@ -26,6 +22,50 @@ log_info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
 log_ok() { printf '\033[0;32m[OK]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 log_error() { printf '\033[0;31m[FAIL]\033[0m %s\n' "$*" >&2; }
+
+prompt_required() {
+  local label="$1"
+  local current="${2:-}"
+  local value
+
+  while :; do
+    if [ -n "$current" ]; then
+      printf '%s [%s]: ' "$label" "$current" >&2
+    else
+      printf '%s: ' "$label" >&2
+    fi
+    IFS= read -r value || value=""
+    if [ -z "$value" ] && [ -n "$current" ]; then
+      value="$current"
+    fi
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    log_warn "$label 不能为空"
+  done
+}
+
+prompt_secret() {
+  local label="$1"
+  local value
+
+  while :; do
+    if [ -t 0 ]; then
+      printf '%s: ' "$label" >&2
+      IFS= read -r -s value || value=""
+      printf '\n' >&2
+    else
+      printf '%s: ' "$label" >&2
+      IFS= read -r value || value=""
+    fi
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    log_warn "$label 不能为空"
+  done
+}
 
 project_config_dir() {
   printf '%s\n' "${CLASH_CODEX_AUTODL_CONFIG_DIR:-${CODEX_AUTODL_CONFIG_DIR:-$HOME/.config/clash-codex-autodl}}"
@@ -43,16 +83,11 @@ project_config_file() {
 
 apply_project_defaults() {
   CLASH_URL="${CLASH_URL:-$DEFAULT_CLASH_URL}"
-  CODEX_DOMESTIC_BASE_URL="${CODEX_DOMESTIC_BASE_URL:-$DEFAULT_DOMESTIC_BASE_URL}"
-  CODEX_OVERSEAS_BASE_URL="${CODEX_OVERSEAS_BASE_URL:-$DEFAULT_OVERSEAS_BASE_URL}"
-  CODEX_ACTIVE_RELAY="${CODEX_ACTIVE_RELAY:-$DEFAULT_ACTIVE_RELAY}"
-  CODEX_RELAY_MODE="${CODEX_RELAY_MODE:-auto}"
   CODEX_PROXY_URL="${CODEX_PROXY_URL:-$DEFAULT_PROXY_URL}"
   CODEX_MIHOMO_CONTROLLER_URL="${CODEX_MIHOMO_CONTROLLER_URL:-$DEFAULT_MIHOMO_CONTROLLER_URL}"
   CODEX_PROXY_GROUP="${CODEX_PROXY_GROUP:-$DEFAULT_CODEX_PROXY_GROUP}"
   CODEX_MODEL="${CODEX_MODEL:-$DEFAULT_CODEX_MODEL}"
   CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-$CODEX_MODEL}"
-  AUTO_CODEX_CHECK_ON_SHELL_START="${AUTO_CODEX_CHECK_ON_SHELL_START:-$DEFAULT_AUTO_CODEX_CHECK_ON_SHELL_START}"
   AUTO_PROXY_ON_SHELL_START="${AUTO_PROXY_ON_SHELL_START:-$DEFAULT_AUTO_PROXY_ON_SHELL_START}"
 }
 
@@ -97,9 +132,6 @@ save_project_config() {
 
   {
     write_config_value CLASH_URL
-    write_config_value CODEX_DOMESTIC_BASE_URL
-    write_config_value CODEX_OVERSEAS_BASE_URL
-    write_config_value CODEX_ACTIVE_RELAY
     write_config_value CODEX_PROXY_URL
     write_config_value CODEX_MIHOMO_CONTROLLER_URL
     write_config_value CODEX_PROXY_GROUP
@@ -126,53 +158,6 @@ validate_http_url() {
   esac
 }
 
-url_hostname() {
-  local url="$1"
-  local host rest
-
-  if command -v python3 >/dev/null 2>&1; then
-    host="$(
-      python3 - "$url" <<'PY' 2>/dev/null || true
-import sys
-from urllib.parse import urlparse
-
-host = urlparse(sys.argv[1]).hostname
-if host:
-    print(host)
-PY
-    )"
-    if [ -n "$host" ]; then
-      printf '%s\n' "$host"
-      return 0
-    fi
-  fi
-
-  rest="$url"
-  case "$rest" in
-    *://*) rest="${rest#*://}" ;;
-  esac
-  rest="${rest%%/*}"
-  rest="${rest%%\?*}"
-  rest="${rest%%#*}"
-  rest="${rest##*@}"
-
-  case "$rest" in
-    \[*\]*)
-      host="${rest#\[}"
-      host="${host%%\]*}"
-      ;;
-    *)
-      host="${rest%%:*}"
-      ;;
-  esac
-
-  if [ -z "$host" ]; then
-    return 1
-  fi
-
-  printf '%s\n' "$host"
-}
-
 python_command() {
   local candidate candidate_path
 
@@ -190,26 +175,6 @@ PY
   done
 
   return 1
-}
-
-validate_codex_relay_urls() {
-  local missing=0
-
-  if [ -z "${CODEX_DOMESTIC_BASE_URL:-}" ]; then
-    log_error "CODEX_DOMESTIC_BASE_URL 为空。请先配置国内/直连中转站地址。"
-    missing=1
-  else
-    validate_http_url CODEX_DOMESTIC_BASE_URL "$CODEX_DOMESTIC_BASE_URL" || missing=1
-  fi
-
-  if [ -z "${CODEX_OVERSEAS_BASE_URL:-}" ]; then
-    log_error "CODEX_OVERSEAS_BASE_URL 为空。请先配置国外/代理中转站地址。"
-    missing=1
-  else
-    validate_http_url CODEX_OVERSEAS_BASE_URL "$CODEX_OVERSEAS_BASE_URL" || missing=1
-  fi
-
-  return "$missing"
 }
 
 proxy_env_is_active() {
@@ -504,7 +469,8 @@ base = os.environ.get("CODEX_MIHOMO_CONTROLLER_URL", "http://127.0.0.1:6006").rs
 group = os.environ.get("CODEX_PROXY_GROUP", "CodexProxy")
 
 try:
-    with urllib.request.urlopen(f"{base}/proxies/{group}", timeout=3) as resp:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"{base}/proxies/{group}", timeout=3) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     print(payload.get("now") or "DIRECT")
 except Exception:
@@ -547,161 +513,33 @@ function proxy-status {
   fi
 }
 
-detect_relay_mode() {
-  case "${CODEX_ACTIVE_RELAY:-${CODEX_RELAY_MODE:-auto}}" in
-    domestic | overseas)
-      printf '%s\n' "${CODEX_ACTIVE_RELAY:-$CODEX_RELAY_MODE}"
-      ;;
-    auto)
-      if proxy_env_is_active; then
-        printf 'overseas\n'
-      else
-        printf 'domestic\n'
-      fi
-      ;;
-    "")
-      printf 'domestic\n'
-      ;;
-    *)
-      log_error "Codex 中转模式无效: ${CODEX_ACTIVE_RELAY:-$CODEX_RELAY_MODE}"
-      return 1
-      ;;
-  esac
-}
-
-relay_base_url_for_mode() {
-  case "$1" in
-    domestic)
-      if [ -z "$CODEX_DOMESTIC_BASE_URL" ]; then
-        log_error "CODEX_DOMESTIC_BASE_URL 为空。请先配置国内/直连中转站地址。"
-        return 1
-      fi
-      printf '%s\n' "$CODEX_DOMESTIC_BASE_URL"
-      ;;
-    overseas)
-      if [ -z "$CODEX_OVERSEAS_BASE_URL" ]; then
-        log_error "CODEX_OVERSEAS_BASE_URL 为空。请先配置国外/代理中转站地址。"
-        return 1
-      fi
-      printf '%s\n' "$CODEX_OVERSEAS_BASE_URL"
-      ;;
-    *)
-      log_error "中转模式无效: $1"
-      return 1
-      ;;
-  esac
-}
-
-write_codex_config_for_mode() {
-  local mode="$1"
-  local base_url
-  local config_file
-
-  base_url="$(relay_base_url_for_mode "$mode")" || return 1
-  mkdir -p "$HOME/.codex"
-  config_file="$HOME/.codex/config.toml"
-
-  if [ -f "$config_file" ] && [ ! -f "$config_file.codex-bootstrap.bak" ]; then
-    cp "$config_file" "$config_file.codex-bootstrap.bak"
-  fi
-
-  cat > "$config_file" <<EOF
-model_provider = "OpenAI"
-model = "$CODEX_MODEL"
-review_model = "$CODEX_REVIEW_MODEL"
-model_reasoning_effort = "xhigh"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
-model_context_window = 1000000
-model_auto_compact_token_limit = 900000
-
-[model_providers.OpenAI]
-name = "OpenAI"
-base_url = "$base_url"
-wire_api = "responses"
-requires_openai_auth = true
-EOF
-
-  chmod 600 "$config_file" 2>/dev/null || true
-  CODEX_ACTIVE_RELAY="$mode"
-  save_project_config
-  log_ok "Codex 中转站已切换到 $mode: $base_url"
-}
-
-inject_codex_overseas_rule_into_mihomo_config() {
-  local config_file="$CODEX_AUTODL_REPO_ROOT/conf/config.yaml"
-  local yq_binary="$CODEX_AUTODL_REPO_ROOT/bin/yq"
-  local overseas_host
-
-  load_project_config
-
-  if [ -z "${CODEX_OVERSEAS_BASE_URL:-}" ]; then
-    log_warn "未配置 CODEX_OVERSEAS_BASE_URL，跳过 Mihomo 海外规则更新"
-    return 0
-  fi
-
-  if [ ! -f "$config_file" ]; then
-    log_warn "未找到 Mihomo 配置文件: $config_file"
-    return 0
-  fi
-
-  if [ ! -x "$yq_binary" ]; then
-    log_warn "未找到 yq 工具: $yq_binary"
-    return 0
-  fi
-
-  overseas_host="$(url_hostname "$CODEX_OVERSEAS_BASE_URL")" || {
-    log_warn "无法解析 CODEX_OVERSEAS_BASE_URL 的 host，跳过 Mihomo 海外规则更新"
-    return 0
-  }
-
-  CODEX_OVERSEAS_HOST="$overseas_host" "$yq_binary" eval -i '
-    ."mixed-port" = (.["mixed-port"] // 7890) |
-    .mode = "rule" |
-    ."external-controller" = (.["external-controller"] // "127.0.0.1:6006") |
-    ."external-ui" = (.["external-ui"] // "dashboard") |
-    .rules = (
-      ["DOMAIN," + strenv(CODEX_OVERSEAS_HOST) + ",CodexProxy"] +
-      ((.rules // []) | map(select(. != ("DOMAIN," + strenv(CODEX_OVERSEAS_HOST) + ",CodexProxy"))))
-    ) |
-    ."proxy-groups" = (
-      [{
-        "name": "CodexProxy",
-        "type": "select",
-        "proxies": ((.proxies // []) | map(.name))
-      }] +
-      ((."proxy-groups" // []) | map(select(.name != "CodexProxy")))
-    )
-  ' "$config_file"
-
-  log_ok "已更新 Mihomo 海外中转规则: $overseas_host"
-}
-
-json_escape() {
-  local value="${1:-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '%s' "$value"
-}
-
-write_codex_auth() {
-  if [ -z "${OPENAI_API_KEY:-}" ]; then
-    log_error "OPENAI_API_KEY 为空，无法写入 Codex 认证。"
-    return 1
-  fi
-
-  mkdir -p "$HOME/.codex"
-  printf '{\n  "OPENAI_API_KEY": "%s"\n}\n' "$(json_escape "$OPENAI_API_KEY")" > "$HOME/.codex/auth.json"
-  chmod 600 "$HOME/.codex/auth.json" 2>/dev/null || true
-  log_ok "Codex 认证已写入 ~/.codex/auth.json"
-}
-
 ensure_local_bin_on_path() {
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) export PATH="$HOME/.local/bin:$PATH" ;;
   esac
+}
+
+codex_install_manifest() {
+  printf '%s/install-manifest\n' "${CLASH_CODEX_AUTODL_DATA_DIR:-$HOME/.local/share/clash-codex-autodl}"
+}
+
+record_project_codex_install() {
+  local binary_path="$1"
+  local manifest tmp_file
+  manifest="$(codex_install_manifest)"
+  mkdir -p "$(dirname "$manifest")"
+  tmp_file="$(mktemp "${manifest}.tmp.XXXXXX")"
+  {
+    printf 'INSTALLED_BY_PROJECT='
+    shell_single_quote true
+    printf '\n'
+    printf 'CODEX_BINARY_PATH='
+    shell_single_quote "$binary_path"
+    printf '\n'
+  } > "$tmp_file"
+  chmod 600 "$tmp_file" 2>/dev/null || true
+  mv "$tmp_file" "$manifest"
 }
 
 codex_release_archive_name() {
@@ -738,7 +576,7 @@ install_codex_cli_from_github_release() {
 
   archive_name="$(codex_release_archive_name)" || return 1
   github_path="/openai/codex/releases/latest/download/${archive_name}"
-  mirrors="ghfast.top/https://github.com github.com kkgithub.com gitclone.com"
+  mirrors="github.com ghfast.top/https://github.com"
   tmp_dir="$(mktemp -d)"
   archive_file="$tmp_dir/$archive_name"
   extract_dir="$tmp_dir/extract"
@@ -747,7 +585,7 @@ install_codex_cli_from_github_release() {
   for mirror in $mirrors; do
     url="https://${mirror}${github_path}"
     log_info "正在从 $mirror 下载 Codex CLI"
-    if curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "$archive_file" "$url"; then
+    if curl -fL -C - --retry 2 --connect-timeout 10 --max-time 240 -o "$archive_file" "$url"; then
       rm -rf "$extract_dir"
       mkdir -p "$extract_dir"
       if tar -xzf "$archive_file" -C "$extract_dir"; then
@@ -757,6 +595,7 @@ install_codex_cli_from_github_release() {
           chmod +x "$HOME/.local/bin/codex"
           rm -rf "$tmp_dir"
           ensure_local_bin_on_path
+          record_project_codex_install "$HOME/.local/bin/codex"
           log_ok "已通过 GitHub Release 安装 Codex CLI: $HOME/.local/bin/codex"
           return 0
         fi
@@ -778,8 +617,9 @@ ensure_codex_cli() {
 
   log_info "未找到 Codex CLI，尝试官方独立安装器"
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh; then
+    if curl -fsSL --connect-timeout 10 --max-time 60 https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh; then
       if command -v codex >/dev/null 2>&1; then
+        record_project_codex_install "$(command -v codex)"
         log_ok "已通过官方独立安装器安装 Codex CLI"
         return 0
       fi
@@ -797,6 +637,7 @@ ensure_codex_cli() {
   if command -v npm >/dev/null 2>&1; then
     npm install -g @openai/codex
     if command -v codex >/dev/null 2>&1; then
+      record_project_codex_install "$(command -v codex)"
       log_ok "已通过 npm 安装 Codex CLI"
       return 0
     fi
@@ -806,85 +647,83 @@ ensure_codex_cli() {
   return 1
 }
 
-startup_proxy_status() {
-  load_project_config
-
-  if [ "${AUTO_PROXY_ON_SHELL_START}" = "true" ]; then
-    enable_proxy_env || true
+global_clash_codex_command() {
+  if [ -x "$HOME/.local/bin/clash-codex" ]; then
+    printf '%s\n' "$HOME/.local/bin/clash-codex"
   else
-    clear_proxy_env
-    log_warn "代理: 未开启"
-  fi
-
-  if proxy_env_is_active && python_command >/dev/null 2>&1; then
-    local node
-    node="$(current_proxy_node)"
-    if [ "$node" = "unknown" ]; then
-      log_warn "当前节点: unknown"
-    else
-      log_ok "当前节点: $node"
-    fi
-  elif proxy_env_is_active; then
-    log_warn "当前节点: 未检测，缺少可用的 python3/python"
-  else
-    log_warn "当前节点: 未检测，代理未开启"
+    printf '%s/clash-codex\n' "$CODEX_AUTODL_REPO_ROOT"
   fi
 }
 
-startup_codex_status() {
-  load_project_config
-
-  local mode base_url
-  mode="$(detect_relay_mode)" || {
-    log_error "Codex 中转站: 未知"
-    return 1
-  }
-  base_url="$(relay_base_url_for_mode "$mode")" || return 1
-
-  log_ok "Codex 中转站: $mode $base_url"
-}
-
-shell_startup_status() {
-  startup_proxy_status || true
-  startup_codex_status || true
-}
-
-install_shell_hook() {
-  local hook_file="$HOME/.codex/clash-codex-autodl.sh"
-  local old_hook_file="$HOME/.codex/clash-autodl-codex.sh"
-  local config_dir
-
-  config_dir="$(project_config_dir)"
-  mkdir -p "$HOME/.codex"
-  cat > "$hook_file" <<EOF
-# 由 clash-codex-autodl 管理
-export CODEX_AUTODL_REPO_ROOT="$CODEX_AUTODL_REPO_ROOT"
-export CLASH_CODEX_AUTODL_REPO_ROOT="$CODEX_AUTODL_REPO_ROOT"
-export CLASH_CODEX_AUTODL_CONFIG_DIR="$config_dir"
-export CODEX_AUTODL_CONFIG_DIR="$config_dir"
-export PATH="$HOME/.local/bin:\$PATH"
-
-# shellcheck source=/dev/null
-if [ -f "\${CODEX_AUTODL_REPO_ROOT}/lib/codex_common.sh" ]; then
-  . "\${CODEX_AUTODL_REPO_ROOT}/lib/codex_common.sh"
-  load_project_config
-  shell_startup_status || true
-else
-  printf '\\033[1;33m[WARN]\\033[0m clash-codex-autodl 仓库不存在: %s\\n' "\${CODEX_AUTODL_REPO_ROOT}"
-fi
-EOF
-  chmod 600 "$hook_file" 2>/dev/null || true
-  rm -f "$old_hook_file"
-
+remove_legacy_shell_hook_blocks() {
+  rm -f "$HOME/.codex/clash-autodl-codex.sh" "$HOME/.codex/clash-codex-autodl.sh"
   touch "$HOME/.bashrc"
   sed -i '/# clash-autodl-codex begin/,/# clash-autodl-codex end/d' "$HOME/.bashrc"
   sed -i '/# clash-codex-autodl begin/,/# clash-codex-autodl end/d' "$HOME/.bashrc"
+}
+
+install_proxy_shell_hook() {
+  local config_dir hook_file command_path
+  config_dir="$(project_config_dir)"
+  hook_file="$config_dir/proxy-shell-init.sh"
+  command_path="$(global_clash_codex_command)"
+  mkdir -p "$config_dir"
+  remove_legacy_shell_hook_blocks
+
+  cat > "$hook_file" <<EOF
+# 由 clash-codex-autodl 管理
+export CLASH_CODEX_AUTODL_CONFIG_DIR="$config_dir"
+export CODEX_AUTODL_CONFIG_DIR="$config_dir"
+export PATH="$HOME/.local/bin:\$PATH"
+proxy-on() { eval "\$("$command_path" proxy on)"; }
+proxy-off() { eval "\$("$command_path" proxy off)"; }
+proxy-pick() { "$command_path" proxy pick; }
+proxy-status() { "$command_path" proxy status; }
+if [ -f "$config_dir/config.sh" ]; then
+  . "$config_dir/config.sh"
+fi
+if [ "\${AUTO_PROXY_ON_SHELL_START:-false}" = "true" ]; then
+  proxy-on || true
+fi
+EOF
+  chmod 600 "$hook_file" 2>/dev/null || true
+  sed -i '/# clash-codex-autodl-proxy begin/,/# clash-codex-autodl-proxy end/d' "$HOME/.bashrc"
   {
-    echo "# clash-codex-autodl begin"
+    echo "# clash-codex-autodl-proxy begin"
     echo "[ -f \"$hook_file\" ] && . \"$hook_file\""
-    echo "# clash-codex-autodl end"
+    echo "# clash-codex-autodl-proxy end"
   } >> "$HOME/.bashrc"
-  log_ok "已在 ~/.bashrc 中安装 clash-codex-autodl 启动钩子"
+  log_ok "已安装全局 proxy-* 命令"
+}
+
+install_codex_shell_hook() {
+  local config_dir hook_file command_path
+  config_dir="$(project_config_dir)"
+  hook_file="$config_dir/codex-shell-init.sh"
+  command_path="$(global_clash_codex_command)"
+  mkdir -p "$config_dir"
+  remove_legacy_shell_hook_blocks
+
+  cat > "$hook_file" <<EOF
+# 由 clash-codex-autodl 管理
+export PATH="$HOME/.local/bin:\$PATH"
+codex() { "$command_path" run "\$@"; }
+codex-status() { "$command_path" status; }
+codex-verify() { "$command_path" verify; }
+EOF
+  chmod 600 "$hook_file" 2>/dev/null || true
+  sed -i '/# clash-codex-autodl-codex begin/,/# clash-codex-autodl-codex end/d' "$HOME/.bashrc"
+  {
+    echo "# clash-codex-autodl-codex begin"
+    echo "[ -f \"$hook_file\" ] && . \"$hook_file\""
+    echo "# clash-codex-autodl-codex end"
+  } >> "$HOME/.bashrc"
+  log_ok "已安装 Codex 认证包装命令"
+}
+
+install_shell_hook() {
+  install_proxy_shell_hook
+  install_codex_shell_hook
 }
 
 print_daily_commands() {
@@ -896,166 +735,12 @@ print_daily_commands() {
   proxy-pick
   proxy-status
 
-Codex 中转站命令:
-  codex-use-in
-  codex-use-out
-  codex-ex-in
-  codex-ex-out
+Codex 命令:
+  clash-codex auth api
+  clash-codex auth chatgpt
   codex-status
   codex-verify
 TEXT
-}
-
-codex_switch_relay_mode() {
-  local mode="$1"
-  local config_file="${2:-}"
-
-  if [ -n "$config_file" ]; then
-    if [ -f "$config_file" ]; then
-      load_project_config "$config_file"
-    else
-      load_project_config
-    fi
-  else
-    load_project_config
-  fi
-
-  case "$mode" in
-    auto)
-      mode="$(detect_relay_mode)" || return 1
-      ;;
-    domestic | overseas)
-      ;;
-    *)
-      log_error "中转模式无效: $mode"
-      return 1
-      ;;
-  esac
-
-  write_codex_config_for_mode "$mode"
-}
-
-function codex-use-in {
-  codex_switch_relay_mode domestic
-}
-
-function codex-use-out {
-  codex_switch_relay_mode overseas
-  inject_codex_overseas_rule_into_mihomo_config || true
-}
-
-codex_exchange_relay_url() {
-  local mode="$1"
-  local url="${2:-}"
-  local name prompt active_mode original_mode
-
-  if [ "$#" -gt 2 ]; then
-    log_error "用法: codex-ex-in [url] 或 codex-ex-out [url]"
-    return 1
-  fi
-
-  load_project_config
-
-  case "$mode" in
-    domestic)
-      name="CODEX_DOMESTIC_BASE_URL"
-      prompt="请输入国内直连中转站地址: "
-      ;;
-    overseas)
-      name="CODEX_OVERSEAS_BASE_URL"
-      prompt="请输入国外代理中转站地址: "
-      ;;
-    *)
-      log_error "中转模式无效: $mode"
-      return 1
-      ;;
-  esac
-
-  if [ -z "$url" ]; then
-    printf '%s' "$prompt" >&2
-    IFS= read -r url || {
-      log_error "未读取到 Codex 中转站 URL"
-      return 1
-    }
-  fi
-
-  validate_http_url "$name" "$url" || return 1
-
-  case "$mode" in
-    domestic)
-      CODEX_DOMESTIC_BASE_URL="$url"
-      ;;
-    overseas)
-      CODEX_OVERSEAS_BASE_URL="$url"
-      ;;
-  esac
-
-  original_mode="$(detect_relay_mode)" || original_mode=""
-
-  save_project_config
-
-  active_mode="$original_mode"
-  if [ "$active_mode" = "$mode" ]; then
-    write_codex_config_for_mode "$mode" >/dev/null
-    log_ok "Codex 中转站: $mode $url"
-  elif [ -n "$active_mode" ]; then
-    log_ok "已保存 $mode 中转站: $url"
-  else
-    log_ok "已保存 $mode 中转站: $url"
-  fi
-
-  if [ "$mode" = "overseas" ]; then
-    inject_codex_overseas_rule_into_mihomo_config || true
-  fi
-}
-
-function codex-ex-in {
-  codex_exchange_relay_url domestic "$@"
-}
-
-function codex-ex-out {
-  codex_exchange_relay_url overseas "$@"
-}
-
-function codex-status {
-  load_project_config
-
-  local mode base_url
-  mode="$(detect_relay_mode)" || return 1
-  base_url="$(relay_base_url_for_mode "$mode")" || return 1
-  log_info "Codex 中转站: $mode $base_url"
-}
-
-codex_audit_host() {
-  load_project_config
-
-  log_info "主机: $(hostname 2>/dev/null || echo unknown)"
-  log_info "用户: $(id -un 2>/dev/null || echo unknown)"
-  log_info "Shell: ${SHELL:-unknown}"
-  log_info "Codex 配置: ${HOME}/.codex/config.toml"
-
-  if [ -f "$HOME/.codex/config.toml" ]; then
-    log_ok "Codex 配置文件存在"
-  else
-    log_warn "Codex 配置文件不存在"
-  fi
-
-  if [ -f "$HOME/.codex/auth.json" ]; then
-    log_ok "Codex 认证文件存在"
-  else
-    log_warn "Codex 认证文件不存在"
-  fi
-
-  for cmd in codex curl wget python3; do
-    if command -v "$cmd" >/dev/null 2>&1; then
-      log_ok "已找到 $cmd: $(command -v "$cmd")"
-    else
-      log_warn "未找到 $cmd"
-    fi
-  done
-
-  proxy-status
-  codex-status || true
 }
 
 function proxy-pick {
@@ -1154,41 +839,6 @@ PY
   fi
 }
 
-relay_responds_direct() {
-  local url="$1"
-  local candidate code
-
-  for candidate in "$url" "${url%/}/responses" "${url%/}/v1/models"; do
-    code="$(curl -sSIL --max-time 15 -o /dev/null -w '%{http_code}' "$candidate" 2>/dev/null || true)"
-    if [ "$code" = "000" ] || [ -z "$code" ]; then
-      code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "$candidate" 2>/dev/null || true)"
-    fi
-    if [ "$code" != "000" ] && [ -n "$code" ]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-relay_responds_via_proxy() {
-  local url="$1"
-  local proxy_url="${2:-$CODEX_PROXY_URL}"
-  local candidate code
-
-  for candidate in "$url" "${url%/}/responses" "${url%/}/v1/models"; do
-    code="$(curl -sSIL --max-time 15 -x "$proxy_url" -o /dev/null -w '%{http_code}' "$candidate" 2>/dev/null || true)"
-    if [ "$code" = "000" ] || [ -z "$code" ]; then
-      code="$(curl -sS --max-time 15 -x "$proxy_url" -o /dev/null -w '%{http_code}' "$candidate" 2>/dev/null || true)"
-    fi
-    if [ "$code" != "000" ] && [ -n "$code" ]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
 codex_smoke_log_summary() {
   local log_file="$1"
   local reason=""
@@ -1212,14 +862,22 @@ codex_smoke_log_summary() {
 
 codex_smoke_test() {
   local codex_status
+  local codex_command="${CODEX_CLI_COMMAND:-codex}"
   local had_errexit
   local smoke_timeout="${CODEX_SMOKE_TIMEOUT:-180}"
   local quiet="${CODEX_SMOKE_TEST_QUIET:-false}"
   local tmp_log
   local tmp_output
-  local prompt='请只回复: CODEX_RELAY_READY'
+  local prompt='请只回复: CODEX_READY'
 
-  require_command codex || return 1
+  if [[ "$codex_command" == */* ]]; then
+    [ -x "$codex_command" ] || {
+      log_error "Codex CLI 不可执行: $codex_command"
+      return 1
+    }
+  else
+    require_command "$codex_command" || return 1
+  fi
   tmp_log="$(mktemp)"
   tmp_output="$(mktemp)"
   had_errexit="false"
@@ -1230,12 +888,12 @@ codex_smoke_test() {
   if command -v timeout >/dev/null 2>&1; then
     set +e
     timeout --kill-after=10s "${smoke_timeout}s" \
-      codex exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
+      "$codex_command" exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
         </dev/null > "$tmp_log" 2>&1
     codex_status="$?"
   else
     set +e
-    codex exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
+    "$codex_command" exec --skip-git-repo-check --ephemeral --output-last-message "$tmp_output" "$prompt" \
       </dev/null > "$tmp_log" 2>&1
     codex_status="$?"
   fi
@@ -1261,7 +919,7 @@ codex_smoke_test() {
     return 1
   fi
 
-  if grep -Fxq 'CODEX_RELAY_READY' "$tmp_output"; then
+  if grep -Fxq 'CODEX_READY' "$tmp_output"; then
     rm -f "$tmp_output" "$tmp_log"
     if [ "$quiet" != "true" ]; then
       log_ok "Codex 可用"
@@ -1278,6 +936,5 @@ codex_smoke_test() {
 
 function codex-verify {
   load_project_config
-  codex-status
   codex_smoke_test
 }

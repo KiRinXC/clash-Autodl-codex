@@ -22,24 +22,19 @@ grep -q "after-proxy-pick" <<<"$output"
 function_names="$(
   bash -lc "
     source '$repo_root/lib/codex_common.sh'
-    type proxy-on proxy-off proxy-status codex-use-in codex-use-out codex-ex-in codex-ex-out codex-status codex-verify
+    type proxy-on proxy-off proxy-status codex-verify
   " 2>&1
 )"
 
 grep -q "proxy-on is a function" <<<"$function_names"
 grep -q "proxy-off is a function" <<<"$function_names"
 grep -q "proxy-status is a function" <<<"$function_names"
-grep -q "codex-use-in is a function" <<<"$function_names"
-grep -q "codex-use-out is a function" <<<"$function_names"
-grep -q "codex-ex-in is a function" <<<"$function_names"
-grep -q "codex-ex-out is a function" <<<"$function_names"
-grep -q "codex-status is a function" <<<"$function_names"
 grep -q "codex-verify is a function" <<<"$function_names"
 
 old_names="$(
   bash -lc "
     source '$repo_root/lib/codex_common.sh'
-    type proxy_on proxy_off proxy_pick proxy_status codex_use_domestic codex_use_overseas codex_relay_status codex_verify
+    type proxy_on proxy_off proxy_pick proxy_status codex-use-in codex-use-out codex-ex-in codex-ex-out codex_verify
   " 2>&1 || true
 )"
 
@@ -47,7 +42,8 @@ grep -q "proxy_on: not found" <<<"$old_names"
 grep -q "proxy_off: not found" <<<"$old_names"
 grep -q "proxy_pick: not found" <<<"$old_names"
 grep -q "proxy_status: not found" <<<"$old_names"
-grep -q "codex_use_domestic: not found" <<<"$old_names"
-grep -q "codex_use_overseas: not found" <<<"$old_names"
-grep -q "codex_relay_status: not found" <<<"$old_names"
+grep -q "codex-use-in: not found" <<<"$old_names"
+grep -q "codex-use-out: not found" <<<"$old_names"
+grep -q "codex-ex-in: not found" <<<"$old_names"
+grep -q "codex-ex-out: not found" <<<"$old_names"
 grep -q "codex_verify: not found" <<<"$old_names"

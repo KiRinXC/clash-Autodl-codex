@@ -2,54 +2,26 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp_home="$(mktemp -d)"
-tmp_state="$(mktemp -d)"
-fake_bin="$(mktemp -d)"
+tmp_dir="$(mktemp -d)"
+tmp_home="$tmp_dir/home"
+called="$tmp_dir/called"
 
 cleanup() {
-  rm -rf "$tmp_home" "$tmp_state" "$fake_bin"
+  rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
 
-cat > "$fake_bin/codex" <<'SH'
+mkdir -p "$tmp_home/.local/bin"
+cat > "$tmp_home/.local/bin/clash-codex" <<SH
 #!/usr/bin/env bash
-out_file=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --output-last-message)
-      out_file="$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-if [ -n "$out_file" ]; then
-  printf '%s\n' "CODEX_RELAY_READY" > "$out_file"
-fi
-exit 0
+printf '%s\n' "\$*" > '$called'
 SH
-chmod +x "$fake_bin/codex"
+chmod +x "$tmp_home/.local/bin/clash-codex"
 
-cat > "$tmp_state/config.sh" <<'EOF'
-CODEX_DOMESTIC_BASE_URL='https://domestic.example.invalid/api'
-CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
-CODEX_ACTIVE_RELAY='domestic'
-CODEX_PROXY_URL='http://127.0.0.1:7890'
-CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:6006'
-CODEX_PROXY_GROUP='CodexProxy'
-CODEX_MODEL='gpt-5.4'
-CODEX_REVIEW_MODEL='gpt-5.4'
-AUTO_CODEX_CHECK_ON_SHELL_START='false'
-EOF
+HOME="$tmp_home" bash "$repo_root/verify_codex.sh"
+grep -qx 'verify' "$called"
 
-output="$(
-  HOME="$tmp_home" \
-  PATH="$fake_bin:$PATH" \
-  CODEX_AUTODL_CONFIG_DIR="$tmp_state" \
-  bash "$repo_root/verify_codex.sh" current 2>&1
-)"
-
-grep -q "\[INFO\].*Codex 中转站: domestic https://domestic.example.invalid/api" <<<"$output"
-grep -q "\[OK\].*Codex 可用" <<<"$output"
+if HOME="$tmp_home" bash "$repo_root/verify_codex.sh" current >/dev/null 2>&1; then
+  printf 'verify_codex.sh should reject legacy relay arguments\n' >&2
+  exit 1
+fi

@@ -23,7 +23,7 @@ EOF
   output="$(
     PATH="$fake_bin:$PATH" \
     CODEX_SMOKE_TIMEOUT=1 \
-    bash -lc "source '$repo_root/lib/codex_common.sh'; codex_smoke_test" 2>&1
+    bash -c "source '$repo_root/lib/codex_common.sh'; codex_smoke_test" 2>&1
   )"
   status="$?"
   set -e
@@ -48,7 +48,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-printf "%s\n" "log mentions CODEX_RELAY_READY, but this is not the final answer" >&2
+printf "%s\n" "log mentions CODEX_READY, but this is not the final answer" >&2
 printf "%s\n" "NOT_READY" > "$out_file"
 sleep 5
 '
@@ -65,7 +65,7 @@ fi
 grep -q '\[FAIL\].*验证失败.*1' <<<"$log_only_output"
 grep -q '\[INFO\].*/tmp/codex-bootstrap-smoke.log' <<<"$log_only_output"
 ! grep -q '\[OK\].*Codex' <<<"$log_only_output"
-! grep -q 'log mentions CODEX_RELAY_READY' <<<"$log_only_output"
+! grep -q 'log mentions CODEX_READY' <<<"$log_only_output"
 
 set +e
 nonzero_output="$(
@@ -82,7 +82,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-printf "%s\n" "CODEX_RELAY_READY" > "$out_file"
+printf "%s\n" "CODEX_READY" > "$out_file"
 exit 42
 '
 )"

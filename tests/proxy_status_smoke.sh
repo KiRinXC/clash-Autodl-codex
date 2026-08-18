@@ -43,6 +43,18 @@ exec "$python_cmd" "\$@"
 SH
 chmod +x "$fake_bin/python3"
 
+cat > "$fake_bin/ss" <<'SH'
+#!/usr/bin/env bash
+printf 'LISTEN 0 128 127.0.0.1:7890 0.0.0.0:*\n'
+SH
+chmod +x "$fake_bin/ss"
+
+cat > "$fake_bin/ps" <<'SH'
+#!/usr/bin/env bash
+printf 'mihomo mihomo -d /tmp/test-conf\n'
+SH
+chmod +x "$fake_bin/ps"
+
 "$python_cmd" - "$controller_port" >"$server_log" 2>&1 <<'PY' &
 import json
 import sys

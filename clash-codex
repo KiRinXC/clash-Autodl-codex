@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$launcher_dir/lib/codex_common.sh" ]; then
+  runtime_dir="$launcher_dir"
+else
+  runtime_dir="${CLASH_CODEX_AUTODL_RUNTIME_DIR:-$HOME/.local/share/clash-codex-autodl/runtime}"
+fi
+
+if [ ! -f "$runtime_dir/lib/codex_common.sh" ]; then
+  printf '[FAIL] clash-codex 运行文件不存在: %s\n' "$runtime_dir" >&2
+  exit 1
+fi
+
+export CLASH_CODEX_AUTODL_REPO_ROOT="$runtime_dir"
+export CODEX_AUTODL_REPO_ROOT="$runtime_dir"
+
+# shellcheck source=lib/codex_common.sh
+. "$runtime_dir/lib/codex_common.sh"
+# shellcheck source=lib/codex_profiles.sh
+. "$runtime_dir/lib/codex_profiles.sh"
+# shellcheck source=lib/codex_sessions.sh
+. "$runtime_dir/lib/codex_sessions.sh"
+
+usage() {
+  cat <<'USAGE'
+用法:
+  clash-codex setup [clash|codex]
+  clash-codex auth [api|chatgpt|status] [--use|--edit]
+  clash-codex sessions [status|sync]
+  clash-codex proxy [on|off|status|pick]
+  clash-codex status
+  clash-codex verify
+  clash-codex run [codex arguments...]
+  clash-codex uninstall [clash|codex|all]
+USAGE
+}
+
+configure_clash_cli() {
+  local current
+  load_project_config
+  current="${CLASH_URL:-}"
+  CLASH_URL="$(prompt_required "请输入 Clash/Mihomo 订阅地址" "$current")"
+  validate_http_url CLASH_URL "$CLASH_URL"
+  save_project_config
+  bash "$runtime_dir/setup_mihomo.sh" "$(project_config_file)"
+  install_proxy_shell_hook
+}
+
+setup_codex_cli() {
+  ensure_codex_cli
+  install_codex_shell_hook
+  log_ok "Codex CLI 已就绪"
+}
+
+setup_command() {
+  if [ "$#" -gt 1 ]; then
+    log_error "用法: clash-codex setup [clash|codex]"
+    return 1
+  fi
+  case "${1:-all}" in
+    clash)
+      configure_clash_cli
+      ;;
+    codex)
+      setup_codex_cli
+      ;;
+    all)
+      configure_clash_cli
+      proxy-on
+      setup_codex_cli
+      manage_codex_auth_profile api interactive
+      verify_command
+      ;;
+    *)
+      log_error "用法: clash-codex setup [clash|codex]"
+      return 1
+      ;;
+  esac
+}
+
+proxy_command() {
+  if [ "$#" -gt 1 ]; then
+    log_error "用法: clash-codex proxy [on|off|status|pick]"
+    return 1
+  fi
+  case "${1:-status}" in
+    on | env-on)
+      proxy-on >&2
+      printf 'export http_proxy=%q https_proxy=%q HTTP_PROXY=%q HTTPS_PROXY=%q\n' \
+        "$CODEX_PROXY_URL" "$CODEX_PROXY_URL" "$CODEX_PROXY_URL" "$CODEX_PROXY_URL"
+      printf 'export no_proxy=%q NO_PROXY=%q\n' '127.0.0.1,localhost' '127.0.0.1,localhost'
+      ;;
+    off | env-off)
+      proxy-off >&2
+      printf 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY\n'
+      ;;
+    status) proxy-status ;;
+    pick) proxy-pick ;;
+    *)
+      log_error "用法: clash-codex proxy [on|off|status|pick]"
+      return 1
+      ;;
+  esac
+}
+
+status_command() {
+  load_project_config
+  proxy-status || true
+  if codex_bin="$(codex_binary_path 2>/dev/null)"; then
+    log_ok "Codex CLI: $($codex_bin --version 2>/dev/null || printf unknown)"
+  else
+    log_warn "Codex CLI: 未安装"
+  fi
+  codex_profiles_status
+  codex_sessions_status
+}
+
+verify_command() {
+  local active home codex_bin
+  active="$(codex_active_auth)"
+  codex_initialize_session_sync
+  home="$(codex_profile_home "$active")"
+  if [ ! -d "$home" ]; then
+    log_error "$active 认证尚未配置，请先运行 clash-codex auth $active"
+    return 1
+  fi
+  codex_bin="$(codex_binary_path)" || {
+    log_error "未找到 Codex CLI"
+    return 1
+  }
+  CODEX_HOME="$home" CODEX_CLI_COMMAND="$codex_bin" codex_smoke_test
+}
+
+main() {
+  local command="${1:-}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  case "$command" in
+    setup) setup_command "$@" ;;
+    auth) codex_auth_command "$@" ;;
+    sessions) codex_sessions_command "$@" ;;
+    proxy) proxy_command "$@" ;;
+    status)
+      [ "$#" -eq 0 ] || { log_error "用法: clash-codex status"; return 1; }
+      status_command
+      ;;
+    verify)
+      [ "$#" -eq 0 ] || { log_error "用法: clash-codex verify"; return 1; }
+      verify_command
+      ;;
+    run) run_codex_with_active_profile "$@" ;;
+    uninstall)
+      [ "$#" -eq 1 ] || { log_error "用法: clash-codex uninstall [clash|codex|all]"; return 1; }
+      bash "$runtime_dir/uninstall_codex_bootstrap.sh" "$1"
+      ;;
+    --help | -h | help | "") usage ;;
+    *)
+      log_error "未知命令: $command"
+      usage
+      return 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -32,7 +32,7 @@ if [ "${1:-}" = "eval" ] && [ "${2:-}" = "-i" ]; then
   {
     printf 'mixed-port: %s\n' "${CODEX_PROXY_PORT:-}"
     printf 'external-controller: %s\n' "${CODEX_MIHOMO_CONTROLLER_BIND:-}"
-    printf 'overseas-host: %s\n' "${CODEX_OVERSEAS_HOST:-}"
+    printf 'proxy-group: %s\n' "${CODEX_PROXY_GROUP_NAME:-}"
   } > "$config_file"
   exit 0
 fi
@@ -43,7 +43,7 @@ if [ "${1:-}" = "eval" ]; then
     '.proxies | length')
       exit 0
       ;;
-    *CodexProxy*length*)
+    *CODEX_PROXY_GROUP_NAME*length*)
       printf '1\n'
       exit 0
       ;;
@@ -119,8 +119,6 @@ chmod +x "$fake_bin/ss"
 
 cat > "$tmp_dir/config.sh" <<'EOF'
 export CLASH_URL='https://subscription.example.invalid/clash.yaml'
-export CODEX_DOMESTIC_BASE_URL='https://domestic.example.invalid/api'
-export CODEX_OVERSEAS_BASE_URL='https://overseas.example.invalid/api'
 export CODEX_PROXY_URL='http://127.0.0.1:17890'
 export CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:16006'
 EOF

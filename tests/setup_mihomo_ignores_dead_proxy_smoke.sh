@@ -129,6 +129,6 @@ https_proxy='http://127.0.0.1:17890' \
 HTTP_PROXY='http://127.0.0.1:17890' \
 HTTPS_PROXY='http://127.0.0.1:17890' \
 EXPECTED_PROXY_PORT=17890 \
-bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
+CLASH_CODEX_AUTODL_CLASH_RUNTIME_DIR="$work_dir" bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
 
 grep -qx 'mixed-port: 17890' "$work_dir/conf/config.yaml"

@@ -117,7 +117,8 @@ export CODEX_PROXY_URL='http://127.0.0.1:17890'
 export CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:16006'
 EOF
 
-PATH="$fake_bin:$PATH" EXPECTED_PROXY_PORT=17890 bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
+PATH="$fake_bin:$PATH" EXPECTED_PROXY_PORT=17890 CLASH_CODEX_AUTODL_CLASH_RUNTIME_DIR="$work_dir" \
+  bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
 
 grep -qx 'mixed-port: 17890' "$work_dir/conf/config.yaml"
 grep -qx 'external-controller: 127.0.0.1:16006' "$work_dir/conf/config.yaml"

@@ -120,7 +120,8 @@ EOF
 mkdir -p "$work_dir/conf"
 dd if=/dev/zero of="$work_dir/conf/geoip.metadb" bs=1048576 count=2 >/dev/null 2>&1
 
-PATH="$fake_bin:$PATH" EXPECTED_PROXY_PORT=17890 bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
+PATH="$fake_bin:$PATH" EXPECTED_PROXY_PORT=17890 CLASH_CODEX_AUTODL_CLASH_RUNTIME_DIR="$work_dir" \
+  bash "$work_dir/setup_mihomo.sh" "$tmp_dir/config.sh"
 
 grep -qx 'mixed-port: 17890' "$work_dir/conf/config.yaml"
 grep -qx 'external-controller: 127.0.0.1:16006' "$work_dir/conf/config.yaml"

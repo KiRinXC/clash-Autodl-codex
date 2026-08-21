@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Codex authentication profiles are isolated with separate CODEX_HOME values.
+# API and ChatGPT credentials stay isolated. Sessions are shared separately.
 
 project_data_dir() {
   printf '%s\n' "${CLASH_CODEX_AUTODL_DATA_DIR:-$HOME/.local/share/clash-codex-autodl}"
@@ -12,13 +12,8 @@ codex_profiles_dir() {
 
 codex_profile_home() {
   case "${1:-}" in
-    api | chatgpt)
-      printf '%s/%s\n' "$(codex_profiles_dir)" "$1"
-      ;;
-    *)
-      log_error "未知 Codex 认证档案: ${1:-}"
-      return 1
-      ;;
+    api | chatgpt) printf '%s/%s\n' "$(codex_profiles_dir)" "$1" ;;
+    *) log_error "未知 Codex 配置: ${1:-}"; return 1 ;;
   esac
 }
 
@@ -26,16 +21,22 @@ codex_active_auth_file() {
   printf '%s/active-auth\n' "$(project_config_dir)"
 }
 
-codex_api_base_url_file() {
-  printf '%s/api-base-url\n' "$(project_config_dir)"
+codex_api_source_file() {
+  printf '%s/api-profile.toml\n' "$(project_config_dir)"
+}
+
+codex_last_verify_file() {
+  printf '%s/last-verify\n' "$(project_config_dir)"
+}
+
+codex_sync_lock_dir() {
+  printf '%s/codex-sync.lock\n' "$(project_data_dir)"
 }
 
 codex_active_auth() {
-  local state_file value
-  state_file="$(codex_active_auth_file)"
-  value=""
-  if [ -f "$state_file" ]; then
-    IFS= read -r value < "$state_file" || true
+  local value=""
+  if [ -f "$(codex_active_auth_file)" ]; then
+    IFS= read -r value < "$(codex_active_auth_file)" || true
   fi
   case "$value" in
     api | chatgpt) printf '%s\n' "$value" ;;
@@ -44,84 +45,29 @@ codex_active_auth() {
 }
 
 save_codex_active_auth() {
-  local profile="$1"
-  local state_file tmp_file
-
+  local profile="$1" file tmp
   codex_profile_home "$profile" >/dev/null || return 1
-  state_file="$(codex_active_auth_file)"
-  mkdir -p "$(dirname "$state_file")"
-  tmp_file="$(mktemp "${state_file}.tmp.XXXXXX")"
-  printf '%s\n' "$profile" > "$tmp_file"
-  chmod 600 "$tmp_file" 2>/dev/null || true
-  mv "$tmp_file" "$state_file"
-}
-
-codex_api_base_url() {
-  local url_file profile_config python_bin value
-  url_file="$(codex_api_base_url_file)"
-  if [ -f "$url_file" ]; then
-    head -n 1 "$url_file"
-    return 0
-  fi
-
-  profile_config="$(codex_profile_home api)/config.toml"
-  [ -f "$profile_config" ] || return 0
-  value=""
-  if python_bin="$(python_command 2>/dev/null)"; then
-    value="$("$python_bin" - "$profile_config" <<'PY' 2>/dev/null || true
-import sys
-import tomllib
-
-with open(sys.argv[1], "rb") as config_file:
-    config = tomllib.load(config_file)
-provider = config.get("model_providers", {}).get("OpenAI", {})
-print(config.get("openai_base_url") or provider.get("base_url", ""))
-PY
-)"
-  fi
-  if [ -z "$value" ]; then
-    value="$(sed -n 's/^[[:space:]]*base_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$profile_config" | head -n 1)"
-  fi
-  printf '%s\n' "$value"
-}
-
-save_codex_api_base_url() {
-  local value="${1:-}"
-  local url_file tmp_file
-
-  if [ -n "$value" ]; then
-    validate_http_url CODEX_API_BASE_URL "$value" || return 1
-  fi
-
-  url_file="$(codex_api_base_url_file)"
-  mkdir -p "$(dirname "$url_file")"
-  tmp_file="$(mktemp "${url_file}.tmp.XXXXXX")"
-  printf '%s\n' "$value" > "$tmp_file"
-  chmod 600 "$tmp_file" 2>/dev/null || true
-  mv "$tmp_file" "$url_file"
+  file="$(codex_active_auth_file)"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  printf '%s\n' "$profile" > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file"
 }
 
 codex_binary_path() {
   local candidate
-
   if [ -n "${CLASH_CODEX_AUTODL_CODEX_BINARY:-}" ] && [ -x "$CLASH_CODEX_AUTODL_CODEX_BINARY" ]; then
     printf '%s\n' "$CLASH_CODEX_AUTODL_CODEX_BINARY"
     return 0
   fi
-
   for candidate in "$HOME/.local/bin/codex" "$(project_data_dir)/bin/codex-real"; do
     if [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
-
-  if command -v codex >/dev/null 2>&1; then
-    command -v codex
-    return 0
-  fi
-
-  return 1
+  command -v codex 2>/dev/null || return 1
 }
 
 toml_escape() {
@@ -131,418 +77,409 @@ toml_escape() {
   printf '%s' "$value"
 }
 
-write_codex_profile_config() {
-  local profile="$1"
-  local home="$2"
-  local api_base_url="${3:-}"
-  local config_file
-
-  codex_profile_home "$profile" >/dev/null || return 1
-  mkdir -p "$home"
-  config_file="$home/config.toml"
-
-  {
-    printf 'cli_auth_credentials_store = "file"\n'
-    printf 'forced_login_method = "%s"\n' "$profile"
-    printf 'model_provider = "openai"\n'
-    printf 'sqlite_home = "%s"\n' "$(toml_escape "$(codex_shared_sqlite_dir)")"
-    if [ -n "${CODEX_MODEL:-}" ]; then
-      printf 'model = "%s"\n' "$(toml_escape "$CODEX_MODEL")"
-    fi
-    if [ -n "${CODEX_REVIEW_MODEL:-}" ]; then
-      printf 'review_model = "%s"\n' "$(toml_escape "$CODEX_REVIEW_MODEL")"
-    fi
-    if [ "$profile" = "api" ] && [ -n "$api_base_url" ]; then
-      printf 'openai_base_url = "%s"\n' "$(toml_escape "$api_base_url")"
-    fi
-  } > "$config_file"
-
-  chmod 600 "$config_file" 2>/dev/null || true
+codex_profile_is_configured() {
+  local home
+  home="$(codex_profile_home "$1")" || return 1
+  [ -s "$home/config.toml" ] && [ -s "$home/auth.json" ]
 }
 
-rewrite_codex_profile_config_for_shared_sessions() {
-  local profile="$1"
-  local home="$2"
-  local config_file endpoint shared_sqlite tmp_file
-
-  config_file="$home/config.toml"
-  [ -f "$config_file" ] || return 0
-  endpoint=""
-  if [ "$profile" = "api" ]; then
-    endpoint="$(codex_api_base_url)"
-  fi
-  shared_sqlite="$(codex_shared_sqlite_dir)"
-  tmp_file="$(mktemp "${config_file}.tmp.XXXXXX")"
-
-  CODEX_SYNC_SQLITE_HOME="$(toml_escape "$shared_sqlite")" \
-  CODEX_SYNC_API_BASE_URL="$(toml_escape "$endpoint")" \
-  CODEX_SYNC_PROFILE="$profile" \
-  awk '
-    function write_shared_settings() {
-      print "model_provider = \"openai\""
-      print "sqlite_home = \"" ENVIRON["CODEX_SYNC_SQLITE_HOME"] "\""
-      if (ENVIRON["CODEX_SYNC_PROFILE"] == "api" && ENVIRON["CODEX_SYNC_API_BASE_URL"] != "") {
-        print "openai_base_url = \"" ENVIRON["CODEX_SYNC_API_BASE_URL"] "\""
-      }
-    }
-    !inserted && /^[[:space:]]*\[/ {
-      write_shared_settings()
-      print ""
-      inserted = 1
-    }
-    !inserted && /^[[:space:]]*(model_provider|sqlite_home|openai_base_url)[[:space:]]*=/ { next }
-    { print }
-    END {
-      if (!inserted) {
-        write_shared_settings()
-      }
-    }
-  ' "$config_file" > "$tmp_file"
-  chmod 600 "$tmp_file" 2>/dev/null || true
-  mv "$tmp_file" "$config_file"
-}
-
-codex_profile_is_valid() {
-  local profile="$1"
-  local home codex_bin
-
-  home="$(codex_profile_home "$profile")" || return 1
-  [ -d "$home" ] || return 1
-  codex_bin="$(codex_binary_path)" || return 1
-  CODEX_HOME="$home" "$codex_bin" login status >/dev/null 2>&1
-}
-
-legacy_codex_auth_is_api() {
-  local auth_file="$HOME/.codex/auth.json"
-  local python_bin
-
-  [ -f "$auth_file" ] || return 1
+codex_api_source_key() {
+  local file="${1:-$(codex_api_source_file)}" value python_bin
+  [ -f "$file" ] || return 1
   if python_bin="$(python_command 2>/dev/null)"; then
-    "$python_bin" - "$auth_file" <<'PY' >/dev/null 2>&1
-import json
+    value="$("$python_bin" - "$file" <<'PY' 2>/dev/null || true
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    value = tomllib.load(source).get("api_key", "")
+if isinstance(value, str):
+    print(value)
+PY
+)"
+  else
+    value="$(sed -n 's/^[[:space:]]*api_key[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1)"
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+codex_extract_source_config() {
+  local file="$1" output="$2"
+  awk '!/^[[:space:]]*api_key[[:space:]]*=/' "$file" > "$output"
+  [ -s "$output" ] || {
+    log_error "API 配置中缺少 config.toml 内容"
+    return 1
+  }
+}
+
+codex_write_api_source() {
+  local url="$1" key="$2" file tmp
+  file="$(codex_api_source_file)"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  {
+    printf '%s\n' '# clash-codex-autodl API profile'
+    printf '%s\n' '# 除 api_key 外，其余内容会作为 Codex config.toml。'
+    printf 'api_key = "%s"\n' "$(toml_escape "$key")"
+    printf '%s\n' 'cli_auth_credentials_store = "file"'
+    printf '%s\n' 'forced_login_method = "api"'
+    printf '%s\n' 'model_provider = "openai"'
+    if [ -n "$url" ]; then
+      printf 'openai_base_url = "%s"\n' "$(toml_escape "$url")"
+    fi
+  } > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file"
+}
+
+codex_config_model_provider() {
+  local config_file="$1" value
+  value="$(sed -n 's/^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -n 1)"
+  printf '%s\n' "${value:-openai}"
+}
+
+codex_config_api_url() {
+  local config_file="$1" provider value python_bin
+  [ -f "$config_file" ] || return 0
+  if python_bin="$(python_command 2>/dev/null)"; then
+    value="$("$python_bin" - "$config_file" <<'PY' 2>/dev/null || true
+import re
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as auth_file:
-    auth = json.load(auth_file)
-if not auth.get("OPENAI_API_KEY"):
-    raise SystemExit(1)
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+def string_value(pattern):
+    match = re.search(pattern, text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+provider = string_value(r'^\s*model_provider\s*=\s*"([^"]+)"') or "openai"
+url = string_value(r'^\s*openai_base_url\s*=\s*"([^"]+)"')
+if not url:
+    section = re.search(r'^\s*\[model_providers\.' + re.escape(provider) + r'\]\s*$([\s\S]*?)(?=^\s*\[|\Z)', text, re.MULTILINE)
+    if section:
+        match = re.search(r'^\s*base_url\s*=\s*"([^"]+)"', section.group(1), re.MULTILINE)
+        if match:
+            url = match.group(1)
+print(url)
 PY
-    return
+)"
+    printf '%s\n' "$value"
+    return 0
   fi
-
-  grep -Eq '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"[^"]+"' "$auth_file"
-}
-
-migrate_legacy_api_profile() {
-  local home root pending codex_bin legacy_config
-
-  home="$(codex_profile_home api)" || return 1
-  [ ! -d "$home" ] || return 0
-  legacy_codex_auth_is_api || return 0
-  codex_bin="$(codex_binary_path)" || return 0
-
-  root="$(codex_profiles_dir)"
-  mkdir -p "$root"
-  pending="$(mktemp -d "$root/.api.pending.XXXXXX")"
-  cp "$HOME/.codex/auth.json" "$pending/auth.json"
-  legacy_config="$HOME/.codex/config.toml"
-  if [ -f "$legacy_config" ]; then
-    cp "$legacy_config" "$pending/config.toml"
-  else
-    write_codex_profile_config api "$pending"
-  fi
-  chmod 600 "$pending/auth.json" "$pending/config.toml" 2>/dev/null || true
-
-  if CODEX_HOME="$pending" "$codex_bin" login status >/dev/null 2>&1; then
-    replace_codex_profile_dir api "$pending"
-    save_codex_active_auth api
-    log_ok "已导入旧版 API 认证到独立档案；~/.codex 未修改"
-  else
-    rm -rf "$pending"
-    log_warn "检测到旧版 API 配置，但验证失败，未导入"
-  fi
-}
-
-codex_profile_action_prompt() {
-  local profile="$1"
-  local answer
-
-  printf '直接按 Enter 使用现有配置，输入 m 修改配置，输入 v 重新验证，输入 q 取消: ' >&2
-  IFS= read -r answer || answer=""
-  case "${answer:-}" in
-    "") printf 'use\n' ;;
-    m | M) printf 'edit\n' ;;
-    v | V) printf 'verify\n' ;;
-    q | Q) printf 'cancel\n' ;;
-    *)
-      log_warn "未知选项，使用现有配置"
-      printf 'use\n'
-      ;;
-  esac
-}
-
-prompt_optional_url() {
-  local label="$1"
-  local current="${2:-}"
-  local value
-
-  if [ -n "$current" ]; then
-    printf '%s [%s]（输入 - 恢复官方默认）: ' "$label" "$current" >&2
-  else
-    printf '%s（直接回车使用官方地址）: ' "$label" >&2
-  fi
-  IFS= read -r value || value=""
+  value="$(sed -n 's/^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -n 1)"
   if [ -z "$value" ]; then
-    value="$current"
-  elif [ "$value" = "-" ]; then
-    value=""
-  fi
-  if [ -n "$value" ]; then
-    validate_http_url CODEX_API_BASE_URL "$value" || return 1
+    provider="$(codex_config_model_provider "$config_file")"
+    value="$(awk -v section="[model_providers.$provider]" '
+      $0 == section { found = 1; next }
+      found && /^[[:space:]]*\[/ { exit }
+      found && /^[[:space:]]*base_url[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
+      }
+    ' "$config_file")"
   fi
   printf '%s\n' "$value"
 }
 
-prompt_yes_no_default_no() {
-  local label="$1"
-  local answer
-  printf '%s [y/N]: ' "$label" >&2
-  IFS= read -r answer || answer=""
-  case "$answer" in
-    y | Y | yes | YES) return 0 ;;
-    *) return 1 ;;
-  esac
+codex_inject_managed_config() {
+  local source="$1" output="$2" sqlite_home
+  sqlite_home="$(toml_escape "$(codex_shared_sqlite_dir)")"
+  CODEX_SHARED_SQLITE_HOME="$sqlite_home" awk '
+    function managed() { print "sqlite_home = \"" ENVIRON["CODEX_SHARED_SQLITE_HOME"] "\"" }
+    !inserted && /^[[:space:]]*\[/ { managed(); print ""; inserted = 1 }
+    !inserted && /^[[:space:]]*sqlite_home[[:space:]]*=/ { next }
+    { print }
+    END { if (!inserted) managed() }
+  ' "$source" > "$output"
 }
 
 replace_codex_profile_dir() {
-  local profile="$1"
-  local pending="$2"
-  local root home backup
-
+  local profile="$1" pending="$2" root home backup
   root="$(codex_profiles_dir)"
   home="$(codex_profile_home "$profile")" || return 1
   backup="$root/.${profile}.previous"
-
   rm -rf "$backup"
-  if [ -d "$home" ]; then
-    mv "$home" "$backup"
-  fi
+  [ ! -d "$home" ] || mv "$home" "$backup"
   if mv "$pending" "$home"; then
     rm -rf "$backup"
     return 0
   fi
-
-  if [ -d "$backup" ]; then
-    mv "$backup" "$home"
-  fi
+  [ ! -d "$backup" ] || mv "$backup" "$home"
   return 1
 }
 
-configure_codex_api_profile() {
-  local home root pending current_url new_url codex_bin api_key replace_key
-
-  root="$(codex_profiles_dir)"
-  home="$(codex_profile_home api)" || return 1
-  codex_bin="$(codex_binary_path)" || {
-    log_error "未找到 Codex CLI，请先运行 clash-codex setup codex"
+apply_codex_api_source() {
+  local source root pending raw_config key codex_bin
+  source="$(codex_api_source_file)"
+  [ -f "$source" ] || { log_error "API 配置不存在: $source"; return 1; }
+  key="$(codex_api_source_key "$source")" || {
+    log_error "API 配置中的 api_key 不能为空"
     return 1
   }
+  codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
+  root="$(codex_profiles_dir)"
   mkdir -p "$root"
-
-  current_url="$(codex_api_base_url)"
-  new_url="$(prompt_optional_url "API Endpoint" "$current_url")" || return 1
-  replace_key="true"
-  if codex_profile_is_valid api; then
-    if ! prompt_yes_no_default_no "是否更换 API Key？"; then
-      replace_key="false"
-    fi
-  fi
-
   pending="$(mktemp -d "$root/.api.pending.XXXXXX")"
-  if [ "$replace_key" = "false" ] && [ -d "$home" ]; then
-    cp -a "$home/." "$pending/"
-  fi
-  write_codex_profile_config api "$pending" "$new_url"
-  codex_link_profile_shared_sessions "$pending" api-pending
-
-  if [ "$replace_key" = "true" ]; then
-    api_key="$(prompt_secret "请输入 OpenAI API Key")"
-    if ! printf '%s\n' "$api_key" | CODEX_HOME="$pending" "$codex_bin" login --with-api-key; then
-      rm -rf "$pending"
-      log_error "API 认证失败，已保留原配置"
-      return 1
-    fi
-    unset api_key
-  fi
-
-  if ! CODEX_HOME="$pending" "$codex_bin" login status >/dev/null 2>&1; then
-    rm -rf "$pending"
-    log_error "API 认证验证失败，已保留原配置"
+  raw_config="$(mktemp)"
+  if ! codex_extract_source_config "$source" "$raw_config" || \
+     ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=' "$raw_config"; then
+    rm -rf "$pending" "$raw_config"
+    log_error "API 配置必须包含 model_provider"
     return 1
   fi
-
+  codex_inject_managed_config "$raw_config" "$pending/config.toml"
+  rm -f "$raw_config"
+  chmod 600 "$pending/config.toml" 2>/dev/null || true
+  codex_link_profile_shared_sessions "$pending" api-pending
+  if ! printf '%s\n' "$key" | CODEX_HOME="$pending" "$codex_bin" login --with-api-key >/dev/null; then
+    rm -rf "$pending"
+    log_error "Codex CLI 未能保存 API 凭据；原运行配置未修改"
+    return 1
+  fi
+  unset key
   replace_codex_profile_dir api "$pending" || return 1
-  save_codex_api_base_url "$new_url"
+  log_ok "API 配置已保存（尚未进行模型调用验证）"
+}
+
+configure_codex_api_initial() {
+  local current_url="" url key
+  if [ -f "$(codex_profile_home api)/config.toml" ]; then
+    current_url="$(codex_config_api_url "$(codex_profile_home api)/config.toml")"
+  fi
+  url="$(prompt_required "请输入 API 地址" "$current_url")"
+  validate_http_url CODEX_API_BASE_URL "$url" || return 1
+  key="$(prompt_secret "请输入 API Key")"
+  codex_write_api_source "$url" "$key"
+  unset key
+  apply_codex_api_source
   save_codex_active_auth api
-  log_ok "已保存并启用 API 认证档案"
 }
 
 configure_codex_chatgpt_profile() {
-  local root pending codex_bin
-
+  local root pending codex_bin raw
+  codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
   root="$(codex_profiles_dir)"
-  codex_bin="$(codex_binary_path)" || {
-    log_error "未找到 Codex CLI，请先运行 clash-codex setup codex"
-    return 1
-  }
   mkdir -p "$root"
   pending="$(mktemp -d "$root/.chatgpt.pending.XXXXXX")"
-  write_codex_profile_config chatgpt "$pending"
+  raw="$(mktemp)"
+  {
+    printf '%s\n' 'cli_auth_credentials_store = "file"'
+    printf '%s\n' 'forced_login_method = "chatgpt"'
+    printf '%s\n' 'model_provider = "openai"'
+  } > "$raw"
+  codex_inject_managed_config "$raw" "$pending/config.toml"
+  rm -f "$raw"
+  chmod 600 "$pending/config.toml" 2>/dev/null || true
   codex_link_profile_shared_sessions "$pending" chatgpt-pending
-
   if ! CODEX_HOME="$pending" "$codex_bin" login --device-auth; then
     rm -rf "$pending"
-    log_error "ChatGPT 认证失败，已保留原配置"
+    log_error "ChatGPT 登录失败；原配置未修改"
     return 1
   fi
-  if ! CODEX_HOME="$pending" "$codex_bin" login status >/dev/null 2>&1; then
-    rm -rf "$pending"
-    log_error "ChatGPT 认证验证失败，已保留原配置"
-    return 1
-  fi
-
   replace_codex_profile_dir chatgpt "$pending" || return 1
-  save_codex_active_auth chatgpt
-  log_ok "已保存并启用 ChatGPT 认证档案"
+  log_ok "ChatGPT 登录已保存"
 }
 
-use_codex_auth_profile() {
-  local profile="$1"
+codex_pick_editor() {
+  if [ -n "${CODEX_CONFIG_EDITOR:-}" ]; then printf '%s\n' "$CODEX_CONFIG_EDITOR"; return; fi
+  if [ -n "${VISUAL:-}" ]; then printf '%s\n' "$VISUAL"; return; fi
+  if [ -n "${EDITOR:-}" ]; then printf '%s\n' "$EDITOR"; return; fi
+  command -v nano 2>/dev/null || command -v vim 2>/dev/null || command -v vi 2>/dev/null || return 1
+}
 
-  if ! codex_profile_is_valid "$profile"; then
-    log_error "$profile 认证档案不存在或已经失效"
+open_codex_api_source() {
+  local file editor
+  file="$(codex_api_source_file)"
+  [ -f "$file" ] || { log_error "API 配置不存在，请先运行 install-codex.sh"; return 1; }
+  editor="$(codex_pick_editor)" || { log_error "未找到编辑器，请设置 EDITOR"; return 1; }
+  sh -c "$editor \"\$1\"" sh "$file" || return 1
+  apply_codex_api_source
+}
+
+codex_acquire_sync_lock() {
+  local lock pid
+  lock="$(codex_sync_lock_dir)"
+  mkdir -p "$(dirname "$lock")"
+  if mkdir "$lock" 2>/dev/null; then
+    printf '%s\n' "$$" > "$lock/pid"
+    return 0
+  fi
+  pid="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && ! kill -0 "$pid" >/dev/null 2>&1; then
+    rm -rf "$lock"
+    mkdir "$lock"
+    printf '%s\n' "$$" > "$lock/pid"
+    return 0
+  fi
+  log_error "另一个 Codex 切换或同步正在进行"
+  return 1
+}
+
+codex_release_sync_lock() {
+  local lock
+  lock="$(codex_sync_lock_dir)"
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$$" ] || rm -rf "$lock"
+}
+
+codex_sync_profile() {
+  local profile="$1" provider status
+  codex_profile_is_configured "$profile" || { log_error "$profile 配置尚未完成"; return 1; }
+  if codex_process_is_running; then
+    log_error "同步前请先关闭其他 Codex CLI / Codex App 进程"
     return 1
   fi
-  save_codex_active_auth "$profile"
-  log_ok "已切换到 $profile 认证"
+  codex_acquire_sync_lock || return 1
+  provider="$(codex_config_model_provider "$(codex_profile_home "$profile")/config.toml")"
+  status=0
+  codex_initialize_session_sync true "$provider" || status=$?
+  codex_release_sync_lock
+  return "$status"
 }
 
-manage_codex_auth_profile() {
-  local profile="$1"
-  local mode="${2:-interactive}"
-  local action
-
-  codex_profile_home "$profile" >/dev/null || return 1
-  if [ "$profile" = "api" ]; then
-    migrate_legacy_api_profile
+codex_switch_profile() {
+  local active target
+  active="$(codex_active_auth)"
+  if [ "$active" = api ]; then target=chatgpt; else target=api; fi
+  if ! codex_profile_is_configured "$target"; then
+    case "$target" in
+      api) apply_codex_api_source ;;
+      chatgpt) configure_codex_chatgpt_profile ;;
+    esac || return 1
   fi
-  codex_initialize_session_sync
-  case "$mode" in
-    use)
-      use_codex_auth_profile "$profile"
-      return
-      ;;
-    edit)
-      action="edit"
-      ;;
-    interactive)
-      if codex_profile_is_valid "$profile"; then
-        log_ok "$profile 认证已配置且有效"
-        action="$(codex_profile_action_prompt "$profile")"
-      else
-        log_warn "$profile 认证尚未配置或已经失效"
-        action="edit"
-      fi
-      ;;
-    *)
-      log_error "未知认证操作: $mode"
-      return 1
-      ;;
-  esac
-
-  case "$action" in
-    use)
-      use_codex_auth_profile "$profile"
-      ;;
-    verify)
-      use_codex_auth_profile "$profile"
-      ;;
-    edit)
-      case "$profile" in
-        api) configure_codex_api_profile ;;
-        chatgpt) configure_codex_chatgpt_profile ;;
-      esac
-      ;;
-    cancel)
-      log_info "已取消认证切换"
-      ;;
-  esac
+  codex_sync_profile "$target" || return 1
+  save_codex_active_auth "$target"
+  log_ok "已切换到 $target 配置并同步会话"
 }
 
-codex_auth_command() {
-  local profile="${1:-}"
-  local option="${2:-}"
-  local mode="interactive"
-
-  if [ "$#" -gt 2 ]; then
-    log_error "用法: clash-codex auth [api|chatgpt|status] [--use|--edit]"
-    return 1
-  fi
-
-  case "$profile" in
-    api | chatgpt) ;;
-    status | "")
-      if [ -n "$option" ]; then
-        log_error "用法: clash-codex auth [api|chatgpt|status] [--use|--edit]"
-        return 1
-      fi
-      codex_profiles_status
-      return
-      ;;
-    *)
-      log_error "用法: clash-codex auth [api|chatgpt|status] [--use|--edit]"
-      return 1
-      ;;
-  esac
-
-  case "$option" in
-    "") mode="interactive" ;;
-    --use) mode="use" ;;
-    --edit | --reset) mode="edit" ;;
-    *)
-      log_error "未知参数: $option"
-      return 1
-      ;;
-  esac
-  manage_codex_auth_profile "$profile" "$mode"
+codex_manual_sync() {
+  local active
+  active="$(codex_active_auth)"
+  codex_sync_profile "$active"
+  codex_sessions_status
 }
 
 codex_profiles_status() {
-  local active profile
+  local active profile home url last
   active="$(codex_active_auth)"
-  log_info "当前 Codex 认证: $active"
+  if [ "$active" = api ]; then
+    url="$(codex_config_api_url "$(codex_profile_home api)/config.toml")"
+    log_info "当前配置: API"
+    log_info "API URL: ${url:-OpenAI 默认地址}"
+  else
+    log_info "当前配置: ChatGPT"
+  fi
   for profile in api chatgpt; do
-    if codex_profile_is_valid "$profile"; then
-      log_ok "$profile 认证: 已配置"
+    home="$(codex_profile_home "$profile")"
+    if codex_profile_is_configured "$profile"; then
+      log_ok "$profile: 已配置"
     else
-      log_warn "$profile 认证: 未配置或已失效"
+      log_warn "$profile: 未配置"
     fi
   done
-  log_info "Codex Home: $(codex_profile_home "$active")"
+  last="$(codex_last_verify_file)"
+  [ ! -s "$last" ] || log_info "最近验证: $(cat "$last")"
+}
+
+codex_shell_status() {
+  local active home url shared rollout_count sync_state
+  active="$(codex_active_auth)"
+  home="$(codex_profile_home "$active")"
+  if codex_profile_is_configured "$active"; then
+    if [ "$active" = api ]; then
+      url="$(codex_config_api_url "$home/config.toml")"
+      printf '[codex] API | %s\n' "${url:-OpenAI 默认地址}"
+    else
+      printf '[codex] ChatGPT\n'
+    fi
+  else
+    printf '[codex] 未配置\n'
+  fi
+
+  shared="$(codex_shared_state_dir)"
+  rollout_count="$(codex_session_rollout_count)"
+  if ! codex_session_sync_is_initialized; then
+    sync_state="待初始化"
+  elif [ -L "$home/sessions" ] && [ "$(readlink "$home/sessions" 2>/dev/null || true)" = "$shared/sessions" ]; then
+    sync_state="已同步"
+  else
+    sync_state="待同步"
+  fi
+  printf '[sync] %s | %s 个会话\n' "$sync_state" "$rollout_count"
+}
+
+codex_record_verify() {
+  local result="$1" file tmp
+  file="$(codex_last_verify_file)"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$result" > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file"
+}
+
+verify_active_codex_profile() {
+  local active home codex_bin
+  active="$(codex_active_auth)"
+  codex_profile_is_configured "$active" || { log_error "$active 配置尚未完成"; return 1; }
+  home="$(codex_profile_home "$active")"
+  codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
+  if CODEX_HOME="$home" CODEX_CLI_COMMAND="$codex_bin" codex_smoke_test; then
+    codex_record_verify success
+    return 0
+  fi
+  codex_record_verify failed
+  return 1
+}
+
+configure_active_codex_profile() {
+  case "$(codex_active_auth)" in
+    api) open_codex_api_source ;;
+    chatgpt) configure_codex_chatgpt_profile ;;
+  esac
 }
 
 run_codex_with_active_profile() {
-  local active home codex_bin
+  local active home codex_bin provider
   active="$(codex_active_auth)"
-  codex_initialize_session_sync
-  home="$(codex_profile_home "$active")" || return 1
-  codex_bin="$(codex_binary_path)" || {
-    log_error "未找到 Codex CLI"
-    return 1
-  }
-  if [ ! -d "$home" ]; then
-    log_error "$active 认证尚未配置，请先运行 clash-codex auth $active"
-    return 1
-  fi
+  codex_profile_is_configured "$active" || { log_error "$active 配置尚未完成"; return 1; }
+  home="$(codex_profile_home "$active")"
+  provider="$(codex_config_model_provider "$home/config.toml")"
+  codex_initialize_session_sync false "$provider" || return 1
+  codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
   CODEX_HOME="$home" exec "$codex_bin" "$@"
+}
+
+codex_migrate_api_source() {
+  local home source config auth key python_bin
+  source="$(codex_api_source_file)"
+  [ ! -f "$source" ] || return 0
+  home="$(codex_profile_home api)"
+  config="$home/config.toml"
+  auth="$home/auth.json"
+  [ -s "$config" ] && [ -s "$auth" ] || return 0
+  key=""
+  if python_bin="$(python_command 2>/dev/null)"; then
+    key="$("$python_bin" - "$auth" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8")).get("OPENAI_API_KEY", "")
+    print(value)
+except Exception:
+    pass
+PY
+)"
+  fi
+  [ -n "$key" ] || key="$(sed -n 's/.*"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$auth" | head -n 1)"
+  [ -n "$key" ] || {
+    log_warn "已有 API 档案无法提取 API Key；运行 codex-config 前需要重新安装 Codex 配置"
+    return 0
+  }
+  mkdir -p "$(dirname "$source")"
+  {
+    printf '%s\n' '# clash-codex-autodl API profile (migrated)'
+    printf 'api_key = "%s"\n' "$(toml_escape "$key")"
+    sed '/^[[:space:]]*sqlite_home[[:space:]]*=/d' "$config"
+  } > "$source"
+  chmod 600 "$source" 2>/dev/null || true
+  unset key
+  log_ok "已迁移旧 API 配置到单文件数据源"
 }

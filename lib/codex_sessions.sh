@@ -139,11 +139,12 @@ PY
 }
 
 codex_normalize_shared_rollout_providers() {
-  local shared python_bin count
+  local target_provider="${1:-openai}"
+  local shared python_bin count escaped_provider
   shared="$(codex_shared_state_dir)"
 
   if python_bin="$(python_command 2>/dev/null)"; then
-    count="$("$python_bin" - "$shared/sessions" "$shared/archived_sessions" <<'PY'
+    count="$(CODEX_TARGET_PROVIDER="$target_provider" "$python_bin" - "$shared/sessions" "$shared/archived_sessions" <<'PY'
 import json
 import os
 import shutil
@@ -151,6 +152,7 @@ import sys
 import tempfile
 
 changed = 0
+target_provider = os.environ["CODEX_TARGET_PROVIDER"]
 for root in sys.argv[1:]:
     if not os.path.isdir(root):
         continue
@@ -168,9 +170,9 @@ for root in sys.argv[1:]:
                 payload = record.get("payload")
                 if record.get("type") != "session_meta" or not isinstance(payload, dict):
                     continue
-                if payload.get("model_provider") == "openai":
+                if payload.get("model_provider") == target_provider:
                     continue
-                payload["model_provider"] = "openai"
+                payload["model_provider"] = target_provider
                 stat = os.stat(path)
                 fd, temp_path = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
                 try:
@@ -193,14 +195,15 @@ PY
   else
     count=0
     while IFS= read -r -d '' rollout; do
-      if sed -i '1 s/"model_provider"[[:space:]]*:[[:space:]]*"[^"]*"/"model_provider":"openai"/' "$rollout"; then
+      escaped_provider="$(printf '%s' "$target_provider" | sed 's/[&|]/\\&/g')"
+      if sed -i "1 s|\"model_provider\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"model_provider\":\"$escaped_provider\"|" "$rollout"; then
         count=$((count + 1))
       fi
     done < <(find "$shared/sessions" "$shared/archived_sessions" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null)
   fi
 
   if [ "${count:-0}" -gt 0 ]; then
-    log_ok "已将 $count 个旧会话的 Provider 元数据对齐为 openai"
+    log_ok "已将 $count 个会话的 Provider 元数据对齐为 $target_provider"
   fi
 }
 
@@ -300,6 +303,7 @@ codex_log_session_import_result() {
 
 codex_initialize_session_sync() {
   local force="${1:-false}"
+  local target_provider="${2:-openai}"
   local shared marker timestamp backup_root conflict_root source_label source_home profile home
 
   shared="$(codex_shared_state_dir)"
@@ -323,7 +327,7 @@ codex_initialize_session_sync() {
     done
     codex_repair_profile_session_links "$backup_root"
     if [ "$force" = "true" ]; then
-      codex_normalize_shared_rollout_providers
+      codex_normalize_shared_rollout_providers "$target_provider"
     fi
     codex_log_session_import_result "$conflict_root"
     return 0
@@ -347,7 +351,7 @@ codex_initialize_session_sync() {
     codex_import_session_source "$source_label" "$source_home" "$conflict_root"
   done
 
-  codex_normalize_shared_rollout_providers
+  codex_normalize_shared_rollout_providers "$target_provider"
   codex_repair_profile_session_links "$backup_root"
 
   printf '%s\n' "$CODEX_SESSION_SYNC_LAYOUT_VERSION" > "$marker"
@@ -383,22 +387,4 @@ codex_sessions_status() {
     fi
     log_info "$profile 会话: $state"
   done
-}
-
-codex_sessions_command() {
-  if [ "$#" -gt 1 ]; then
-    log_error "用法: clash-codex sessions [status|sync]"
-    return 1
-  fi
-  case "${1:-status}" in
-    status) codex_sessions_status ;;
-    sync)
-      codex_initialize_session_sync true
-      codex_sessions_status
-      ;;
-    *)
-      log_error "用法: clash-codex sessions [status|sync]"
-      return 1
-      ;;
-  esac
 }

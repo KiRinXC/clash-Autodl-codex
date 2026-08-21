@@ -6,8 +6,7 @@ DEFAULT_CLASH_URL=""
 DEFAULT_PROXY_URL="http://127.0.0.1:7890"
 DEFAULT_MIHOMO_CONTROLLER_URL="http://127.0.0.1:6006"
 DEFAULT_CODEX_PROXY_GROUP="CodexProxy"
-DEFAULT_CODEX_MODEL="gpt-5.4"
-DEFAULT_AUTO_PROXY_ON_SHELL_START="true"
+DEFAULT_PROXY_ENABLED="true"
 
 if [ -z "${CLASH_CODEX_AUTODL_REPO_ROOT:-}" ] && [ -n "${CODEX_AUTODL_REPO_ROOT:-}" ]; then
   CLASH_CODEX_AUTODL_REPO_ROOT="$CODEX_AUTODL_REPO_ROOT"
@@ -86,9 +85,10 @@ apply_project_defaults() {
   CODEX_PROXY_URL="${CODEX_PROXY_URL:-$DEFAULT_PROXY_URL}"
   CODEX_MIHOMO_CONTROLLER_URL="${CODEX_MIHOMO_CONTROLLER_URL:-$DEFAULT_MIHOMO_CONTROLLER_URL}"
   CODEX_PROXY_GROUP="${CODEX_PROXY_GROUP:-$DEFAULT_CODEX_PROXY_GROUP}"
-  CODEX_MODEL="${CODEX_MODEL:-$DEFAULT_CODEX_MODEL}"
-  CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-$CODEX_MODEL}"
-  AUTO_PROXY_ON_SHELL_START="${AUTO_PROXY_ON_SHELL_START:-$DEFAULT_AUTO_PROXY_ON_SHELL_START}"
+  if [ -z "${PROXY_ENABLED:-}" ] && [ -n "${AUTO_PROXY_ON_SHELL_START:-}" ]; then
+    PROXY_ENABLED="$AUTO_PROXY_ON_SHELL_START"
+  fi
+  PROXY_ENABLED="${PROXY_ENABLED:-$DEFAULT_PROXY_ENABLED}"
 }
 
 load_project_config() {
@@ -121,10 +121,11 @@ write_config_value() {
 }
 
 save_project_config() {
-  local config_file="${1:-$(project_config_file)}"
+  local config_file
   local config_dir
   local tmp_file
 
+  config_file="$(project_config_file)"
   apply_project_defaults
   config_dir="$(dirname "$config_file")"
   mkdir -p "$config_dir"
@@ -135,9 +136,7 @@ save_project_config() {
     write_config_value CODEX_PROXY_URL
     write_config_value CODEX_MIHOMO_CONTROLLER_URL
     write_config_value CODEX_PROXY_GROUP
-    write_config_value CODEX_MODEL
-    write_config_value CODEX_REVIEW_MODEL
-    write_config_value AUTO_PROXY_ON_SHELL_START
+    write_config_value PROXY_ENABLED
   } > "$tmp_file"
 
   chmod 600 "$tmp_file" 2>/dev/null || true
@@ -253,7 +252,7 @@ mihomo_process_text_matches() {
 }
 
 mihomo_pid_is_running() {
-  local pid_file="${1:-$CODEX_AUTODL_REPO_ROOT/mihomo.pid}"
+  local pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
   local pid process_text
 
   if [ ! -f "$pid_file" ]; then
@@ -283,7 +282,7 @@ local_proxy_is_ready() {
   local proxy_url="${1:-$CODEX_PROXY_URL}"
 
   local_proxy_is_listening "$proxy_url" && {
-    mihomo_pid_is_running || proxy_process_is_running
+    mihomo_pid_is_running || proxy_systemd_is_active
   }
 }
 
@@ -327,9 +326,9 @@ mihomo_binary_path() {
   arch="$(mihomo_arch_name)" || return 1
 
   for candidate in \
-    "$CODEX_AUTODL_REPO_ROOT/bin/mihomo-linux-$arch" \
-    "$CODEX_AUTODL_REPO_ROOT/bin/mihomo" \
-    "$CODEX_AUTODL_REPO_ROOT/bin/clash"; do
+    "$CODEX_AUTODL_REPO_ROOT/clash/bin/mihomo-linux-$arch" \
+    "$CODEX_AUTODL_REPO_ROOT/clash/bin/mihomo" \
+    "$CODEX_AUTODL_REPO_ROOT/clash/bin/clash"; do
     if [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -346,11 +345,11 @@ start_existing_mihomo() {
     return 0
   fi
 
-  config_dir="$CODEX_AUTODL_REPO_ROOT/conf"
+  config_dir="$CODEX_AUTODL_REPO_ROOT/clash/conf"
   config_file="$config_dir/config.yaml"
-  log_dir="$CODEX_AUTODL_REPO_ROOT/logs"
+  log_dir="$CODEX_AUTODL_REPO_ROOT/clash/logs"
   log_file="$log_dir/mihomo.log"
-  pid_file="$CODEX_AUTODL_REPO_ROOT/mihomo.pid"
+  pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
 
   if [ ! -f "$config_file" ]; then
     log_warn "Mihomo 配置不存在: $config_file"
@@ -358,7 +357,7 @@ start_existing_mihomo() {
   fi
 
   mihomo_bin="$(mihomo_binary_path)" || {
-    log_warn "Mihomo 二进制不存在，请先运行 bash $CODEX_AUTODL_REPO_ROOT/start.sh --reconfigure-clash"
+    log_warn "Mihomo 二进制不存在，请先运行 install-clash.sh"
     return 1
   }
 
@@ -437,26 +436,142 @@ disable_proxy_env() {
   log_ok "代理已关闭"
 }
 
-function proxy-on {
-  load_project_config
-  AUTO_PROXY_ON_SHELL_START="true"
-  save_project_config
-  enable_proxy_env
+proxy_service_name() {
+  printf '%s\n' 'clash-codex-mihomo.service'
 }
 
-function proxy-off {
+user_systemd_available() {
+  command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
+}
+
+proxy_systemd_is_active() {
+  user_systemd_available && systemctl --user is-active --quiet "$(proxy_service_name)" >/dev/null 2>&1
+}
+
+wait_for_local_proxy() {
+  local wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-10}"
+  for _ in $(seq 1 "$wait_seconds"); do
+    local_proxy_is_ready "$CODEX_PROXY_URL" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+stop_existing_mihomo() {
+  local pid_file pid
+  pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
+  if [ -f "$pid_file" ]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    case "$pid" in
+      '' | *[!0-9]*) ;;
+      *)
+        if kill -0 "$pid" >/dev/null 2>&1; then
+          kill "$pid" >/dev/null 2>&1 || true
+          for _ in 1 2 3 4 5; do
+            kill -0 "$pid" >/dev/null 2>&1 || break
+            sleep 1
+          done
+          if kill -0 "$pid" >/dev/null 2>&1; then
+            kill -9 "$pid" >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+    esac
+  fi
+  rm -f "$pid_file"
+}
+
+enable_proxy_service() {
+  if user_systemd_available && [ -f "$HOME/.config/systemd/user/$(proxy_service_name)" ]; then
+    systemctl --user enable --now "$(proxy_service_name)" >/dev/null
+  else
+    start_existing_mihomo
+  fi
+}
+
+disable_proxy_service() {
+  if user_systemd_available && [ -f "$HOME/.config/systemd/user/$(proxy_service_name)" ]; then
+    systemctl --user disable --now "$(proxy_service_name)" >/dev/null 2>&1 || true
+  fi
+  stop_existing_mihomo
+}
+
+proxy_enable_persistent() {
   load_project_config
-  AUTO_PROXY_ON_SHELL_START="false"
+  PROXY_ENABLED="true"
   save_project_config
-  disable_proxy_env
+  if enable_proxy_service && wait_for_local_proxy; then
+    log_ok "代理已永久开启: $CODEX_PROXY_URL"
+    return 0
+  fi
+  log_error "代理开启失败: Mihomo 未监听 $CODEX_PROXY_URL"
+  return 1
+}
+
+proxy_disable_persistent() {
+  load_project_config
+  PROXY_ENABLED="false"
+  save_project_config
+  disable_proxy_service
+  log_ok "代理已永久关闭"
+}
+
+proxy_print_env() {
+  load_project_config
+  if [ "$PROXY_ENABLED" = "true" ] && local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    printf 'export http_proxy=%q https_proxy=%q HTTP_PROXY=%q HTTPS_PROXY=%q\n' \
+      "$CODEX_PROXY_URL" "$CODEX_PROXY_URL" "$CODEX_PROXY_URL" "$CODEX_PROXY_URL"
+    printf 'export no_proxy=%q NO_PROXY=%q\n' '127.0.0.1,localhost' '127.0.0.1,localhost'
+  else
+    printf 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY\n'
+    return 1
+  fi
+}
+
+proxy_print_unset_env() {
+  printf 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY\n'
+}
+
+proxy_shell_start() {
+  local node
+  load_project_config
+  if [ "$PROXY_ENABLED" != "true" ]; then
+    proxy_print_unset_env
+    printf '[proxy] 已关闭\n' >&2
+    return 0
+  fi
+  if ! local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    enable_proxy_service >/dev/null 2>&1 || true
+  fi
+  if local_proxy_is_ready "$CODEX_PROXY_URL" || wait_for_local_proxy; then
+    proxy_print_env
+    node="$(current_proxy_node)"
+    printf '[proxy] 已开启 | 节点: %s\n' "$node" >&2
+    return 0
+  fi
+  proxy_print_unset_env
+  printf '[proxy] 启动失败: %s\n' "$CODEX_PROXY_URL" >&2
+  return 1
 }
 
 current_proxy_node() {
-  local tmp_py python_bin
-  python_bin="$(python_command)" || {
+  local tmp_py python_bin yq_bin payload node
+  if ! python_bin="$(python_command)"; then
+    yq_bin="$CODEX_AUTODL_REPO_ROOT/clash/bin/yq"
+    if [ -x "$yq_bin" ] && command -v curl >/dev/null 2>&1; then
+      payload="$(curl --noproxy '*' -fsS --max-time 3 \
+        "${CODEX_MIHOMO_CONTROLLER_URL%/}/proxies/$CODEX_PROXY_GROUP" 2>/dev/null || true)"
+      if [ -z "$payload" ]; then
+        printf 'unknown\n'
+        return 0
+      fi
+      node="$(printf '%s' "$payload" | "$yq_bin" eval -r '.now // "DIRECT"' - 2>/dev/null || true)"
+      printf '%s\n' "${node:-unknown}"
+      return 0
+    fi
     printf 'unknown\n'
     return 0
-  }
+  fi
 
   tmp_py="$(mktemp)"
   cat > "$tmp_py" <<'PY'
@@ -483,33 +598,35 @@ PY
 }
 
 function proxy-status {
+  local node running="false"
   load_project_config
 
-  if proxy_env_is_active; then
-    if local_proxy_is_ready "$CODEX_PROXY_URL"; then
-      log_ok "代理: 已开启"
-    else
-      log_warn "代理: 环境变量已开启，但 Mihomo 未运行或代理端口不可用"
-    fi
+  if [ "$PROXY_ENABLED" = "true" ]; then
+    log_ok "永久代理: 已开启"
   else
-    log_warn "代理: 未开启"
+    log_warn "永久代理: 已关闭"
+  fi
+  if proxy_env_is_active; then
+    log_ok "当前终端环境: 已开启"
+  else
+    log_warn "当前终端环境: 未开启"
   fi
   log_info "地址: $CODEX_PROXY_URL"
-  if proxy_process_is_running; then
+  if mihomo_pid_is_running || proxy_systemd_is_active; then
+    running="true"
     log_ok "Mihomo: 运行中"
   else
     log_warn "Mihomo: 未运行"
   fi
-  if python_command >/dev/null 2>&1; then
-    local node
+  if [ "$running" = "true" ]; then
     node="$(current_proxy_node)"
-    if [ "$node" = "unknown" ]; then
-      log_warn "当前节点: unknown"
-    else
-      log_ok "当前节点: $node"
-    fi
   else
-    log_warn "当前节点: 未检测，系统缺少可用的 Python"
+    node="unknown"
+  fi
+  if [ "$node" = "unknown" ]; then
+    log_warn "当前节点: unknown"
+  else
+    log_ok "当前节点: $node"
   fi
 }
 
@@ -570,6 +687,8 @@ install_codex_cli_from_github_release() {
   local extract_dir
   local codex_binary
   local mirrors
+  local retries
+  local max_time
 
   command -v curl >/dev/null 2>&1 || return 1
   command -v tar >/dev/null 2>&1 || return 1
@@ -584,8 +703,15 @@ install_codex_cli_from_github_release() {
 
   for mirror in $mirrors; do
     url="https://${mirror}${github_path}"
+    retries=2
+    max_time=240
+    if [ "$mirror" = "github.com" ]; then
+      retries=0
+      max_time="${GITHUB_DIRECT_MAX_TIME:-30}"
+    fi
     log_info "正在从 $mirror 下载 Codex CLI"
-    if curl -fL -C - --retry 2 --connect-timeout 10 --max-time 240 -o "$archive_file" "$url"; then
+    if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \
+      -o "$archive_file" "$url"; then
       rm -rf "$extract_dir"
       mkdir -p "$extract_dir"
       if tar -xzf "$archive_file" -C "$extract_dir"; then
@@ -647,12 +773,8 @@ ensure_codex_cli() {
   return 1
 }
 
-global_clash_codex_command() {
-  if [ -x "$HOME/.local/bin/clash-codex" ]; then
-    printf '%s\n' "$HOME/.local/bin/clash-codex"
-  else
-    printf '%s/clash-codex\n' "$CODEX_AUTODL_REPO_ROOT"
-  fi
+internal_command_path() {
+  printf '%s/command.sh\n' "$CODEX_AUTODL_REPO_ROOT"
 }
 
 remove_legacy_shell_hook_blocks() {
@@ -662,11 +784,50 @@ remove_legacy_shell_hook_blocks() {
   sed -i '/# clash-codex-autodl begin/,/# clash-codex-autodl end/d' "$HOME/.bashrc"
 }
 
+install_proxy_systemd_service() {
+  local user_dir unit_file mihomo_bin config_dir log_dir
+  user_systemd_available || {
+    log_info "当前环境不支持 systemd --user，将在首个交互终端中启动 Mihomo"
+    return 0
+  }
+  mihomo_bin="$(mihomo_binary_path)" || return 1
+  config_dir="$CODEX_AUTODL_REPO_ROOT/clash/conf"
+  log_dir="$CODEX_AUTODL_REPO_ROOT/clash/logs"
+  user_dir="$HOME/.config/systemd/user"
+  unit_file="$user_dir/$(proxy_service_name)"
+  mkdir -p "$user_dir" "$log_dir"
+  cat > "$unit_file" <<EOF
+[Unit]
+Description=clash-codex-autodl Mihomo proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="$mihomo_bin" -d "$config_dir"
+Restart=on-failure
+RestartSec=3
+StandardOutput="append:$log_dir/mihomo.log"
+StandardError="append:$log_dir/mihomo.log"
+
+[Install]
+WantedBy=default.target
+EOF
+  chmod 600 "$unit_file" 2>/dev/null || true
+  systemctl --user daemon-reload
+  if command -v loginctl >/dev/null 2>&1; then
+    if ! loginctl enable-linger "${USER:-$(id -un)}" >/dev/null 2>&1; then
+      log_warn "无法启用 systemd linger；注销后将由首个交互终端启动代理"
+    fi
+  fi
+  log_ok "已安装用户级 Mihomo 开机服务"
+}
+
 install_proxy_shell_hook() {
   local config_dir hook_file command_path
   config_dir="$(project_config_dir)"
   hook_file="$config_dir/proxy-shell-init.sh"
-  command_path="$(global_clash_codex_command)"
+  command_path="$(internal_command_path)"
   mkdir -p "$config_dir"
   remove_legacy_shell_hook_blocks
 
@@ -675,16 +836,13 @@ install_proxy_shell_hook() {
 export CLASH_CODEX_AUTODL_CONFIG_DIR="$config_dir"
 export CODEX_AUTODL_CONFIG_DIR="$config_dir"
 export PATH="$HOME/.local/bin:\$PATH"
-proxy-on() { eval "\$("$command_path" proxy on)"; }
-proxy-off() { eval "\$("$command_path" proxy off)"; }
-proxy-pick() { "$command_path" proxy pick; }
+proxy-on() { "$command_path" proxy enable && eval "\$("$command_path" proxy env)"; }
+proxy-off() { "$command_path" proxy disable; eval "\$("$command_path" proxy env-off)"; }
+proxy-switch() { "$command_path" proxy switch; }
 proxy-status() { "$command_path" proxy status; }
-if [ -f "$config_dir/config.sh" ]; then
-  . "$config_dir/config.sh"
-fi
-if [ "\${AUTO_PROXY_ON_SHELL_START:-false}" = "true" ]; then
-  proxy-on || true
-fi
+case \$- in
+  *i*) eval "\$("$command_path" proxy shell-start)" || true ;;
+esac
 EOF
   chmod 600 "$hook_file" 2>/dev/null || true
   sed -i '/# clash-codex-autodl-proxy begin/,/# clash-codex-autodl-proxy end/d' "$HOME/.bashrc"
@@ -700,7 +858,7 @@ install_codex_shell_hook() {
   local config_dir hook_file command_path
   config_dir="$(project_config_dir)"
   hook_file="$config_dir/codex-shell-init.sh"
-  command_path="$(global_clash_codex_command)"
+  command_path="$(internal_command_path)"
   mkdir -p "$config_dir"
   remove_legacy_shell_hook_blocks
 
@@ -708,8 +866,14 @@ install_codex_shell_hook() {
 # 由 clash-codex-autodl 管理
 export PATH="$HOME/.local/bin:\$PATH"
 codex() { "$command_path" run "\$@"; }
-codex-status() { "$command_path" status; }
-codex-verify() { "$command_path" verify; }
+codex-status() { "$command_path" codex status; }
+codex-verify() { "$command_path" codex verify; }
+codex-switch() { "$command_path" codex switch; }
+codex-sync() { "$command_path" codex sync; }
+codex-config() { "$command_path" codex config; }
+case \$- in
+  *i*) "$command_path" codex shell-status || true ;;
+esac
 EOF
   chmod 600 "$hook_file" 2>/dev/null || true
   sed -i '/# clash-codex-autodl-codex begin/,/# clash-codex-autodl-codex end/d' "$HOME/.bashrc"
@@ -732,24 +896,25 @@ print_daily_commands() {
 代理命令:
   proxy-on
   proxy-off
-  proxy-pick
+  proxy-switch
   proxy-status
 
 Codex 命令:
-  clash-codex auth api
-  clash-codex auth chatgpt
-  codex-status
   codex-verify
+  codex-status
+  codex-switch
+  codex-sync
+  codex-config
 TEXT
 }
 
-function proxy-pick {
+function proxy-switch {
   load_project_config
   local tmp_py python_bin
 
   python_bin="$(python_command)" || {
-    log_error "缺少可用的 python3/python"
-    return 0
+    proxy_switch_with_yq
+    return
   }
 
   tmp_py="$(mktemp)"
@@ -835,8 +1000,55 @@ PY
     return 0
   else
     rm -f "$tmp_py"
-    return 0
+    return 1
   fi
+}
+
+proxy_switch_with_yq() {
+  local yq_bin base state current answer target payload index
+  local -a choices
+  yq_bin="$CODEX_AUTODL_REPO_ROOT/clash/bin/yq"
+  [ -x "$yq_bin" ] || { log_error "缺少可用的 Python 或 yq"; return 1; }
+  command -v curl >/dev/null 2>&1 || { log_error "缺少 curl"; return 1; }
+  base="${CODEX_MIHOMO_CONTROLLER_URL%/}/proxies/$CODEX_PROXY_GROUP"
+
+  while :; do
+    state="$(curl --noproxy '*' -fsS --max-time 10 "$base")" || {
+      log_error "无法连接 Mihomo 控制器: $CODEX_MIHOMO_CONTROLLER_URL"
+      return 1
+    }
+    current="$(printf '%s' "$state" | "$yq_bin" eval -r '.now // "DIRECT"' -)"
+    mapfile -t choices < <(printf '%s' "$state" | "$yq_bin" eval -r '.all[]' - | awk '!seen[$0]++')
+    if [ "${#choices[@]}" -eq 0 ]; then
+      log_error "代理选择组中没有可用节点"
+      return 1
+    fi
+    printf '当前选择: %s\n选择组: %s\n可用节点:\n' "$current" "$CODEX_PROXY_GROUP"
+    for index in "${!choices[@]}"; do
+      if [ "${choices[$index]}" = "$current" ]; then
+        printf '  %s. %s [当前]\n' "$((index + 1))" "${choices[$index]}"
+      else
+        printf '  %s. %s\n' "$((index + 1))" "${choices[$index]}"
+      fi
+    done
+    printf '请输入节点编号（r=刷新，q=退出）: '
+    IFS= read -r answer || return 1
+    case "$answer" in
+      q | Q) return 0 ;;
+      r | R) continue ;;
+      '' | *[!0-9]*) log_warn "无效选择"; continue ;;
+    esac
+    if [ "$answer" -lt 1 ] || [ "$answer" -gt "${#choices[@]}" ]; then
+      log_warn "无效选择"
+      continue
+    fi
+    target="${choices[$((answer - 1))]}"
+    payload="$(CODEX_PROXY_TARGET="$target" "$yq_bin" -n -o=json '{"name": strenv(CODEX_PROXY_TARGET)}')"
+    curl --noproxy '*' -fsS --max-time 10 -X PUT \
+      -H 'Content-Type: application/json' --data "$payload" "$base" >/dev/null
+    printf '已选择: %s\n' "$target"
+    return 0
+  done
 }
 
 codex_smoke_log_summary() {

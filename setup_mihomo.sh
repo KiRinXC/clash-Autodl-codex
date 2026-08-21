@@ -7,9 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MIHOMO_VERSION="${MIHOMO_VERSION:-1.19.11}"
 YQ_VERSION="${YQ_VERSION:-v4.44.3}"
-BIN_DIR="$SCRIPT_DIR/bin"
-CONF_DIR="$SCRIPT_DIR/conf"
-LOG_DIR="$SCRIPT_DIR/logs"
+CLASH_RUNTIME_DIR="${CLASH_CODEX_AUTODL_CLASH_RUNTIME_DIR:-$SCRIPT_DIR/clash}"
+BIN_DIR="$CLASH_RUNTIME_DIR/bin"
+CONF_DIR="$CLASH_RUNTIME_DIR/conf"
+LOG_DIR="$CLASH_RUNTIME_DIR/logs"
 CONFIG_FILE="$CONF_DIR/config.yaml"
 GEOIP_METADB_FILE="$CONF_DIR/geoip.metadb"
 YQ_BINARY="$BIN_DIR/yq"
@@ -39,12 +40,19 @@ download_github_file() {
   local github_path="$1"
   local output_file="$2"
   local description="$3"
-  local mirror url
+  local mirror url retries max_time
 
   for mirror in "${GITHUB_MIRRORS[@]}"; do
     url="https://${mirror}${github_path}"
+    retries=2
+    max_time=180
+    if [ "$mirror" = "github.com" ]; then
+      retries=0
+      max_time="${GITHUB_DIRECT_MAX_TIME:-30}"
+    fi
     log_info "正在从 $mirror 下载 $description"
-    if curl -fL -C - --retry 2 --connect-timeout 10 --max-time 180 -o "$output_file" "$url"; then
+    if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \
+      -o "$output_file" "$url"; then
       if [ -s "$output_file" ]; then
         log_ok "$description 下载完成"
         return 0
@@ -248,27 +256,13 @@ inject_proxy_settings() {
 start_mihomo() {
   local mihomo_bin="$1"
   local mihomo_pid
-  local old_pids
-  local -a old_pid_array
 
   mkdir -p "$LOG_DIR"
-
-  old_pids="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /^(mihomo|mihomo-linux|clash|clash-linux)/ {print $1}' || true)"
-  if [ -n "$old_pids" ]; then
-    log_warn "重启前正在停止已有的 Mihomo/Clash 进程"
-    read -r -a old_pid_array <<< "$old_pids"
-    kill "${old_pid_array[@]}" >/dev/null 2>&1 || true
-    sleep 2
-    old_pids="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /^(mihomo|mihomo-linux|clash|clash-linux)/ {print $1}' || true)"
-    if [ -n "$old_pids" ]; then
-      read -r -a old_pid_array <<< "$old_pids"
-      kill -9 "${old_pid_array[@]}" >/dev/null 2>&1 || true
-    fi
-  fi
+  stop_existing_mihomo
 
   nohup "$mihomo_bin" -d "$CONF_DIR" > "$LOG_DIR/mihomo.log" 2>&1 </dev/null &
   mihomo_pid="$!"
-  echo "$mihomo_pid" > "$SCRIPT_DIR/mihomo.pid"
+  echo "$mihomo_pid" > "$CLASH_RUNTIME_DIR/mihomo.pid"
 
   for _ in $(seq 1 20); do
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then

@@ -19,32 +19,30 @@ jobs:
 
       - name: Bash syntax
         run: |
-          find . -type f \( -name '*.sh' -o -name 'clash-codex' \) -print0 |
+          find . -type f -name '*.sh' -print0 |
             xargs -0 -n1 bash -n
 
       - name: ShellCheck production scripts
         run: |
           shellcheck \
-            clash-codex \
-            install.sh \
-            start.sh \
-            bootstrap_codex.sh \
+            command.sh \
+            install-clash.sh \
+            install-codex.sh \
             setup_mihomo.sh \
-            verify_codex.sh \
-            uninstall_codex_bootstrap.sh \
+            uninstall.sh \
             converter.sh \
+            lib/install_runtime.sh \
             lib/codex_common.sh \
             lib/codex_profiles.sh \
             lib/codex_sessions.sh
 
       - name: Help commands
         run: |
-          bash clash-codex --help
-          bash start.sh --help
-          bash bootstrap_codex.sh --help
+          bash command.sh --help
+          bash install-clash.sh --help
+          bash install-codex.sh --help
           bash setup_mihomo.sh --help
-          bash verify_codex.sh --help
-          bash uninstall_codex_bootstrap.sh --help
+          bash uninstall.sh --help
           bash converter.sh --help
 
       - name: Smoke tests

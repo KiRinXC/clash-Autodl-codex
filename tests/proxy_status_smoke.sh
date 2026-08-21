@@ -10,6 +10,9 @@ server_log="$tmp_dir/server.log"
 python_cmd=""
 
 cleanup() {
+  if [ -n "${mihomo_pid:-}" ] && kill -0 "$mihomo_pid" >/dev/null 2>&1; then
+    kill "$mihomo_pid" >/dev/null 2>&1 || true
+  fi
   if [ -n "${server_pid:-}" ] && kill -0 "$server_pid" >/dev/null 2>&1; then
     kill "$server_pid" >/dev/null 2>&1 || true
   fi
@@ -17,7 +20,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$fake_bin"
+mkdir -p "$fake_bin" "$tmp_dir/runtime/clash"
 
 for candidate in python3 python; do
   if command -v "$candidate" >/dev/null 2>&1; then
@@ -87,10 +90,14 @@ class Handler(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
 server_pid=$!
+bash -c 'exec -a mihomo sleep 1000' &
+mihomo_pid=$!
+printf '%s\n' "$mihomo_pid" > "$tmp_dir/runtime/clash/mihomo.pid"
 sleep 1
 
 output="$(
   CODEX_AUTODL_CONFIG_DIR="$tmp_dir" \
+  CLASH_CODEX_AUTODL_REPO_ROOT="$tmp_dir/runtime" \
   PATH="$fake_bin:$PATH" \
   bash -c "
     set -euo pipefail
@@ -104,6 +111,7 @@ output="$(
   " 2>&1
 )"
 
-grep -q "\[OK\].*代理: 已开启" <<<"$output"
+grep -q "\[OK\].*永久代理: 已开启" <<<"$output"
+grep -q "\[OK\].*当前终端环境: 已开启" <<<"$output"
 grep -q "\[INFO\].*地址: http://127.0.0.1:7890" <<<"$output"
 grep -q "\[OK\].*当前节点: Node A" <<<"$output"

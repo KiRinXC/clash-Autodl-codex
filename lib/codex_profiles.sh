@@ -392,7 +392,7 @@ open_codex_api_source() {
   file="$(codex_api_source_file)"
   if [ ! -f "$file" ]; then
     log_warn "API 文本配置不存在，将重新创建: $file"
-    configure_codex_api_initial
+    configure_codex_api_initial ""
     return
   fi
   editor="$(codex_pick_editor)" || { log_error "未找到编辑器，请设置 EDITOR"; return 1; }

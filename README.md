@@ -45,7 +45,9 @@ bash install-clash.sh
 bash install-codex.sh
 ```
 
-脚本安装 Codex CLI，然后依次等待输入 API 地址和 API Key。默认配置使用 `model_provider = "openai"`。
+如果 `PATH` 中已经存在可用的 Codex CLI，脚本会直接复用它，不会覆盖该程序，也不会在卸载项目组件时删除它；只有找不到 Codex 时才会尝试安装。无论 Codex CLI 是预先安装还是由本项目安装，都需要执行一次上面的脚本，以部署本项目自己的 `codex-*` 管理命令、shell hook 和双认证配置。这些命令不是 Codex CLI 自带的。
+
+管理命令会先安装，再等待输入 API 地址和 API Key。因此配置输入意外中断后，重新打开终端仍可使用 `codex-status` 查看状态，并可重新运行 `bash install-codex.sh` 继续配置。默认配置使用 `model_provider = "openai"`。
 
 安装只保存配置，不会进行模型调用验证。API Key 通过 Codex CLI 的 `login --with-api-key` 写入运行凭据；只有手动运行 `codex-verify` 才会发起真实验证请求。
 
@@ -70,6 +72,8 @@ API 用户数据保存在：
 ~/.config/clash-codex-autodl/api-profile.toml
 ```
 
+这是需要查看和编辑的文本文件。`~/.local/bin/codex`、`which codex` 输出的其他 `codex` 路径通常是 ELF 可执行程序，直接 `cat` 显示乱码是正常现象，它不是配置文件。安装和运行 `codex-config` 时都会明确显示实际的文本配置路径。
+
 示例结构：
 
 ```toml
@@ -81,6 +85,8 @@ openai_base_url = "https://example.com/v1"
 ```
 
 该文件本身是合法 TOML。`codex-config` 按 `CODEX_CONFIG_EDITOR`、`VISUAL`、`EDITOR`、`nano`、`vim`、`vi` 的顺序选择编辑器。保存后，脚本会将除 `api_key` 以外的内容生成运行用 `config.toml`，并让当前 Codex CLI 生成 `auth.json`。
+
+如果旧的 `api-profile.toml` 为空、缺少 `api_key`、缺少 `model_provider` 或 TOML 已损坏，重新运行安装脚本会先将它备份为 `api-profile.toml.invalid.<时间>.<进程号>`，再重新询问 API 地址和 Key。新配置成功前，已经可用的运行配置不会被覆盖。
 
 `model_provider` 是配置 ID，不是认证方式。若使用自定义 `[model_providers.<id>]`，必须保证它与顶层 `model_provider = "<id>"` 完全一致。
 

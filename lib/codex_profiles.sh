@@ -104,6 +104,29 @@ PY
   printf '%s\n' "$value"
 }
 
+codex_api_source_is_usable() {
+  local file="${1:-$(codex_api_source_file)}" raw_config status
+  [ -f "$file" ] || return 1
+  codex_api_source_key "$file" >/dev/null 2>&1 || return 1
+  raw_config="$(mktemp)"
+  status=0
+  codex_extract_source_config "$file" "$raw_config" >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ] && ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=' "$raw_config"; then
+    status=1
+  fi
+  rm -f "$raw_config"
+  return "$status"
+}
+
+codex_backup_invalid_api_source() {
+  local source="${1:-$(codex_api_source_file)}" backup
+  [ -f "$source" ] || return 1
+  backup="${source}.invalid.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  mv "$source" "$backup"
+  chmod 600 "$backup" 2>/dev/null || true
+  printf '%s\n' "$backup"
+}
+
 codex_extract_source_config() {
   local file="$1" output="$2"
   awk '!/^[[:space:]]*api_key[[:space:]]*=/' "$file" > "$output"
@@ -241,10 +264,16 @@ apply_codex_api_source() {
 }
 
 configure_codex_api_initial() {
-  local current_url="" url key
-  if [ -f "$(codex_profile_home api)/config.toml" ]; then
+  local current_url="${1:-}" url key source
+  source="$(codex_api_source_file)"
+  if [ -z "$current_url" ] && [ -f "$source" ]; then
+    current_url="$(codex_config_api_url "$source")"
+  fi
+  if [ -z "$current_url" ] && [ -f "$(codex_profile_home api)/config.toml" ]; then
     current_url="$(codex_config_api_url "$(codex_profile_home api)/config.toml")"
   fi
+  log_info "API 文本配置将保存到: $source"
+  log_info "Codex CLI 可执行文件不是配置文件，请不要使用 cat 或编辑器打开 codex 二进制文件"
   url="$(prompt_required "请输入 API 地址" "$current_url")"
   validate_http_url CODEX_API_BASE_URL "$url" || return 1
   key="$(prompt_secret "请输入 API Key")"
@@ -289,8 +318,14 @@ codex_pick_editor() {
 open_codex_api_source() {
   local file editor
   file="$(codex_api_source_file)"
-  [ -f "$file" ] || { log_error "API 配置不存在，请先运行 install-codex.sh"; return 1; }
+  if [ ! -f "$file" ]; then
+    log_warn "API 文本配置不存在，将重新创建: $file"
+    configure_codex_api_initial
+    return
+  fi
   editor="$(codex_pick_editor)" || { log_error "未找到编辑器，请设置 EDITOR"; return 1; }
+  log_info "正在编辑 API 文本配置: $file"
+  log_info "请勿编辑或 cat Codex CLI 可执行文件；保存此 TOML 后会自动生成运行配置"
   sh -c "$editor \"\$1\"" sh "$file" || return 1
   apply_codex_api_source
 }
@@ -449,9 +484,9 @@ run_codex_with_active_profile() {
 }
 
 codex_migrate_api_source() {
-  local home source config auth key python_bin
+  local home source config auth key python_bin pending backup
   source="$(codex_api_source_file)"
-  [ ! -f "$source" ] || return 0
+  codex_api_source_is_usable "$source" && return 0
   home="$(codex_profile_home api)"
   config="$home/config.toml"
   auth="$home/auth.json"
@@ -474,12 +509,24 @@ PY
     return 0
   }
   mkdir -p "$(dirname "$source")"
+  pending="$(mktemp "${source}.migrate.XXXXXX")"
   {
     printf '%s\n' '# clash-codex-autodl API profile (migrated)'
     printf 'api_key = "%s"\n' "$(toml_escape "$key")"
     sed '/^[[:space:]]*sqlite_home[[:space:]]*=/d' "$config"
-  } > "$source"
-  chmod 600 "$source" 2>/dev/null || true
+  } > "$pending"
+  chmod 600 "$pending" 2>/dev/null || true
+  if ! codex_api_source_is_usable "$pending"; then
+    rm -f "$pending"
+    unset key
+    log_warn "已有 API 档案无法生成有效的单文件配置"
+    return 0
+  fi
+  if [ -f "$source" ]; then
+    backup="$(codex_backup_invalid_api_source "$source")"
+    log_warn "已备份无效的旧 API 文本配置: $backup"
+  fi
+  mv "$pending" "$source"
   unset key
   log_ok "已迁移旧 API 配置到单文件数据源"
 }

@@ -33,7 +33,10 @@ prompt_required() {
     else
       printf '%s: ' "$label" >&2
     fi
-    IFS= read -r value || value=""
+    if ! IFS= read -r value; then
+      log_error "输入已结束，配置未完成（$label）"
+      return 1
+    fi
     if [ -z "$value" ] && [ -n "$current" ]; then
       value="$current"
     fi
@@ -52,11 +55,18 @@ prompt_secret() {
   while :; do
     if [ -t 0 ]; then
       printf '%s: ' "$label" >&2
-      IFS= read -r -s value || value=""
+      if ! IFS= read -r -s value; then
+        printf '\n' >&2
+        log_error "输入已结束，配置未完成（$label）"
+        return 1
+      fi
       printf '\n' >&2
     else
       printf '%s: ' "$label" >&2
-      IFS= read -r value || value=""
+      if ! IFS= read -r value; then
+        log_error "输入已结束，配置未完成（$label）"
+        return 1
+      fi
     fi
     if [ -n "$value" ]; then
       printf '%s\n' "$value"
@@ -734,10 +744,13 @@ install_codex_cli_from_github_release() {
 }
 
 ensure_codex_cli() {
+  local existing
   ensure_local_bin_on_path
 
   if command -v codex >/dev/null 2>&1; then
-    log_ok "已找到 Codex CLI: $(command -v codex)"
+    existing="$(command -v codex)"
+    log_ok "已找到现有 Codex CLI: $existing"
+    log_info "将复用该 Codex CLI；本项目只安装 codex-* 管理命令和独立认证配置，不会覆盖它"
     return 0
   fi
 

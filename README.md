@@ -49,6 +49,8 @@ bash install-codex.sh
 
 管理命令会先安装，再等待输入 API 地址和 API Key。因此配置输入意外中断后，重新打开终端仍可使用 `codex-status` 查看状态，并可重新运行 `bash install-codex.sh` 继续配置。默认配置使用 `model_provider = "openai"`。
 
+API Key 使用隐藏输入，右键粘贴后终端不会显示星号或任何字符，按 Enter 即可。脚本会清理常见的终端括号粘贴标记和 `CR` 字符；如果第一次粘贴没有生效，可以直接重试，提示信息不会写入 Key。
+
 安装只保存配置，不会进行模型调用验证。API Key 通过 Codex CLI 的 `login --with-api-key` 写入运行凭据；只有手动运行 `codex-verify` 才会发起真实验证请求。
 
 ### Codex 命令

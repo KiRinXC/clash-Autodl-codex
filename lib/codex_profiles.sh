@@ -104,9 +104,24 @@ PY
   printf '%s\n' "$value"
 }
 
+codex_api_source_toml_is_valid() {
+  local file="${1:-$(codex_api_source_file)}" python_bin
+  [ -f "$file" ] || return 1
+  if python_bin="$(python_command 2>/dev/null)"; then
+    "$python_bin" - "$file" <<'PY' >/dev/null 2>&1
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    tomllib.load(source)
+PY
+  fi
+}
+
 codex_api_source_is_usable() {
   local file="${1:-$(codex_api_source_file)}" raw_config status
   [ -f "$file" ] || return 1
+  codex_api_source_toml_is_valid "$file" || return 1
   codex_api_source_key "$file" >/dev/null 2>&1 || return 1
   raw_config="$(mktemp)"
   status=0
@@ -153,6 +168,11 @@ codex_write_api_source() {
     fi
   } > "$tmp"
   chmod 600 "$tmp" 2>/dev/null || true
+  if ! codex_api_source_toml_is_valid "$tmp"; then
+    rm -f "$tmp"
+    log_error "生成的 API 配置不是有效 TOML；粘贴内容可能含有不可见控制字符"
+    return 1
+  fi
   mv "$tmp" "$file"
 }
 
@@ -234,6 +254,11 @@ apply_codex_api_source() {
   local source root pending raw_config key codex_bin
   source="$(codex_api_source_file)"
   [ -f "$source" ] || { log_error "API 配置不存在: $source"; return 1; }
+  codex_api_source_toml_is_valid "$source" || {
+    log_error "API 配置不是有效 TOML: $source"
+    log_error "请运行 codex-config 修复；右键粘贴时请避免带入换行或不可见控制字符"
+    return 1
+  }
   key="$(codex_api_source_key "$source")" || {
     log_error "API 配置中的 api_key 不能为空"
     return 1
@@ -276,8 +301,12 @@ configure_codex_api_initial() {
   log_info "Codex CLI 可执行文件不是配置文件，请不要使用 cat 或编辑器打开 codex 二进制文件"
   url="$(prompt_required "请输入 API 地址" "$current_url")"
   validate_http_url CODEX_API_BASE_URL "$url" || return 1
+  log_info "API Key 使用隐藏输入：右键粘贴后屏幕不会显示字符，按 Enter 即可"
   key="$(prompt_secret "请输入 API Key")"
-  codex_write_api_source "$url" "$key"
+  if ! codex_write_api_source "$url" "$key"; then
+    unset key
+    return 1
+  fi
   unset key
   apply_codex_api_source
   save_codex_active_auth api

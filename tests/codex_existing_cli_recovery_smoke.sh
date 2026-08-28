@@ -43,7 +43,9 @@ model_provider = "openai"
 openai_base_url = "https://old-api.example.invalid/v1"
 TOML
 
-  output="$(printf '%s\n%s\n' 'https://new-api.example.invalid/v1' 'new-test-key' | env \
+  # Simulate one ineffective paste/empty Enter, then a right-click paste carrying
+  # terminal bracketed-paste markers and CR. Prompt warnings must never enter the key.
+  output="$(printf '%s\n\n%b\n' 'https://new-api.example.invalid/v1' $'\033[200~new-test-key\r\033[201~' | env \
     HOME="$home" PATH="$bin:$PATH" \
     CLASH_CODEX_AUTODL_CONFIG_DIR="$config" \
     CLASH_CODEX_AUTODL_DATA_DIR="$data" \
@@ -56,6 +58,8 @@ TOML
   grep -q '检测到空白或无效的 API 文本配置' <<< "$output"
   grep -q "API 文本配置将保存到: $config/api-profile.toml" <<< "$output"
   grep -q 'Codex CLI 可执行文件不是配置文件' <<< "$output"
+  grep -q '请输入 API Key 不能为空' <<< "$output"
+  grep -q 'API Key 使用隐藏输入' <<< "$output"
   [ "$(cksum "$bin/codex")" = "$before" ]
   [ ! -e "$data/install-manifest" ]
   [ -x "$bin/codex-status" ]

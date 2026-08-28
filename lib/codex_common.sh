@@ -22,6 +22,27 @@ log_ok() { printf '\033[0;32m[OK]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 log_error() { printf '\033[0;31m[FAIL]\033[0m %s\n' "$*" >&2; }
 
+normalize_pasted_input() {
+  local value="${1:-}" paste_start paste_end
+  paste_start=$'\033[200~'
+  paste_end=$'\033[201~'
+  value="${value//$'\r'/}"
+  case "$value" in
+    "$paste_start"*) value="${value#"$paste_start"}" ;;
+  esac
+  case "$value" in
+    *"$paste_end") value="${value%"$paste_end"}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+input_has_control_characters() {
+  case "${1:-}" in
+    *[[:cntrl:]]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 prompt_required() {
   local label="$1"
   local current="${2:-}"
@@ -37,6 +58,11 @@ prompt_required() {
       log_error "输入已结束，配置未完成（$label）"
       return 1
     fi
+    value="$(normalize_pasted_input "$value")"
+    if input_has_control_characters "$value"; then
+      log_warn "$label 包含不可见控制字符，请重新粘贴" >&2
+      continue
+    fi
     if [ -z "$value" ] && [ -n "$current" ]; then
       value="$current"
     fi
@@ -44,7 +70,7 @@ prompt_required() {
       printf '%s\n' "$value"
       return 0
     fi
-    log_warn "$label 不能为空"
+    log_warn "$label 不能为空" >&2
   done
 }
 
@@ -68,11 +94,16 @@ prompt_secret() {
         return 1
       fi
     fi
+    value="$(normalize_pasted_input "$value")"
+    if input_has_control_characters "$value"; then
+      log_warn "$label 包含不可见控制字符，请重新粘贴" >&2
+      continue
+    fi
     if [ -n "$value" ]; then
       printf '%s\n' "$value"
       return 0
     fi
-    log_warn "$label 不能为空"
+    log_warn "$label 不能为空" >&2
   done
 }
 

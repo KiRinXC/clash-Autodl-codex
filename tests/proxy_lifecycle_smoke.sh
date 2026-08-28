@@ -24,6 +24,7 @@ printf 'mixed-port: 17890\n' > "$runtime/clash/conf/config.yaml"
 
 cat > "$runtime/clash/bin/mihomo-linux-amd64" <<'SH'
 #!/usr/bin/env bash
+[ "${FAKE_MIHOMO_FAIL:-false}" != true ] || exit 23
 exec -a mihomo sleep 1000
 SH
 chmod +x "$runtime/clash/bin/mihomo-linux-amd64"
@@ -85,6 +86,17 @@ grep -q 'Controller 状态: Controller 不可访问' <<< "$status_output"
 if grep -q 'unknown' <<< "$status_output"; then exit 1; fi
 disabled_output="$(env "${env_args[@]}" "$runtime/command.sh" proxy shell-start 2>&1)"
 grep -q '\[proxy\] 已关闭' <<< "$disabled_output"
+
+set +e
+failed_enable_output="$(env "${env_args[@]}" FAKE_MIHOMO_FAIL=true \
+  "$runtime/command.sh" proxy enable 2>&1)"
+failed_enable_status="$?"
+set -e
+[ "$failed_enable_status" -ne 0 ]
+grep -q "PROXY_ENABLED='true'" "$tmp_config/config.sh"
+grep -q '永久代理已设为开启，但本次 Mihomo 启动失败；后续 shell 将继续尝试恢复' \
+  <<< "$failed_enable_output"
+env "${env_args[@]}" "$runtime/command.sh" proxy disable >/dev/null
 
 HOME="$tmp_home" CLASH_CODEX_AUTODL_CONFIG_DIR="$tmp_config" \
   CLASH_CODEX_AUTODL_REPO_ROOT="$runtime" bash -c ". '$runtime/lib/codex_common.sh'; install_proxy_shell_hook" >/dev/null

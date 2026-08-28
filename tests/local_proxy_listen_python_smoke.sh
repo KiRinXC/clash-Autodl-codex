@@ -84,3 +84,28 @@ PATH="$fake_bin:$PATH" bash -c "
   source '$repo_root/lib/codex_common.sh'
   local_proxy_is_listening 'http://127.0.0.1:$port'
 "
+
+kill "$server_pid"
+wait "$server_pid" 2>/dev/null || true
+server_pid=""
+curl_log="$tmp_dir/curl.log"
+cat > "$fake_bin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+cp "$fake_bin/python3" "$fake_bin/python"
+cat > "$fake_bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${CURL_LOG:?}"
+exit 0
+SH
+chmod +x "$fake_bin/python3" "$fake_bin/python" "$fake_bin/curl"
+
+if PATH="$fake_bin:$PATH" CURL_LOG="$curl_log" bash -c "
+  source '$repo_root/lib/codex_common.sh'
+  local_proxy_is_listening 'http://127.0.0.1:$port'
+"; then
+  printf 'closed local port should not be reported as listening\n' >&2
+  exit 1
+fi
+[ ! -e "$curl_log" ]

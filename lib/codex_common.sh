@@ -22,6 +22,41 @@ log_ok() { printf '\033[0;32m[OK]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 log_error() { printf '\033[0;31m[FAIL]\033[0m %s\n' "$*" >&2; }
 
+positive_integer_or_default() {
+  local raw="${1:-}" default_value="$2" variable_name="$3" normalized
+
+  if [ -z "$raw" ]; then
+    printf '%s\n' "$default_value"
+    return 0
+  fi
+  case "$raw" in
+    *[!0-9]*) ;;
+    *)
+      normalized="$raw"
+      while [ "${normalized#0}" != "$normalized" ]; do
+        normalized="${normalized#0}"
+      done
+      if [ -n "$normalized" ] && [ "${#normalized}" -le 9 ]; then
+        printf '%s\n' "$normalized"
+        return 0
+      fi
+      ;;
+  esac
+
+  log_warn "$variable_name 必须是正整数；当前值无效，使用默认值 $default_value" >&2
+  printf '%s\n' "$default_value"
+}
+
+mihomo_start_wait_seconds() {
+  positive_integer_or_default "${CODEX_MIHOMO_START_WAIT_SECONDS:-}" 20 \
+    CODEX_MIHOMO_START_WAIT_SECONDS
+}
+
+mihomo_controller_timeout_seconds() {
+  positive_integer_or_default "${CODEX_MIHOMO_CONTROLLER_TIMEOUT:-}" 3 \
+    CODEX_MIHOMO_CONTROLLER_TIMEOUT
+}
+
 normalize_pasted_input() {
   local value="${1:-}" paste_start paste_end
   paste_start=$'\033[200~'
@@ -236,30 +271,17 @@ proxy_env_value_matches_configured_proxy() {
 
 local_proxy_is_listening() {
   local proxy_url="${1:-$CODEX_PROXY_URL}"
-  local host_port host port python_bin
+  local host port python_bin ss_output
 
-  host_port="${proxy_url#http://}"
-  host_port="${host_port#https://}"
-  host_port="${host_port%%/*}"
-  port="${host_port##*:}"
-  host="${host_port%:*}"
-
-  if [ -z "$port" ] || [ "$port" = "$host_port" ]; then
-    return 1
-  fi
-
-  if [ -z "$host" ] || [ "$host" = "$host_port" ]; then
-    host="127.0.0.1"
-  fi
-  host="${host#[}"
-  host="${host%]}"
+  proxy_url_parse_endpoint "$proxy_url" || return 1
+  host="$PROXY_URL_HOST"
+  port="$PROXY_URL_PORT"
 
   if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | grep -q ":${port}[[:space:]]" && return 0
-  fi
-
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    if ss_output="$(ss -H -ltn 2>/dev/null)"; then
+      printf '%s\n' "$ss_output" | local_listener_output_matches "$host" "$port"
+      return
+    fi
   fi
 
   if python_bin="$(python_command)"; then
@@ -279,7 +301,72 @@ except OSError:
 PY
   fi
 
-  curl -sS --max-time 2 -x "$proxy_url" https://example.com >/dev/null 2>&1
+  (exec 3<>"/dev/tcp/$host/$port") >/dev/null 2>&1
+}
+
+proxy_url_parse_endpoint() {
+  local proxy_url="$1" authority host port port_number
+
+  case "$proxy_url" in
+    http://*) authority="${proxy_url#http://}" ;;
+    https://*) authority="${proxy_url#https://}" ;;
+    *) return 1 ;;
+  esac
+  authority="${authority%%/*}"
+  case "$authority" in
+    \[*\]:*)
+      host="${authority%%]*}"
+      host="${host#[}"
+      port="${authority##*:}"
+      ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$host" ] || host="127.0.0.1"
+  case "$port" in '' | *[!0-9]*) return 1 ;; esac
+  [ "${#port}" -le 5 ] || return 1
+  port_number=$((10#$port))
+  [ "$port_number" -ge 1 ] && [ "$port_number" -le 65535 ] || return 1
+
+  PROXY_URL_HOST="$host"
+  PROXY_URL_PORT="$port_number"
+}
+
+local_listener_output_matches() {
+  local host="$1" port="$2"
+  [ -n "$(local_listener_output_matching_lines "$host" "$port")" ]
+}
+
+local_listener_output_matching_lines() {
+  local host="$1" port="$2"
+  awk -v expected_host="$host" -v expected_port="$port" '
+    function host_matches(address) {
+      if (address == expected_host || address == "*" || address == "0.0.0.0" || address == "::") return 1
+      if (expected_host == "localhost" && (address ~ /^127\./ || address == "::1")) return 1
+      return 0
+    }
+    $1 == "LISTEN" {
+      endpoint = $4
+      if (endpoint !~ (":" expected_port "$")) next
+      sub(":" expected_port "$", "", endpoint)
+      gsub(/^\[/, "", endpoint)
+      gsub(/\]$/, "", endpoint)
+      if (host_matches(endpoint)) print
+    }
+  '
+}
+
+proxy_egress_is_working() {
+  local proxy_url="${1:-$CODEX_PROXY_URL}"
+  local target_url="${2:-https://example.com}"
+  local timeout_seconds
+  timeout_seconds="$(positive_integer_or_default "${3:-}" 10 proxy_egress_timeout)"
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsS --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" \
+    -x "$proxy_url" "$target_url" >/dev/null 2>&1
 }
 
 mihomo_process_text_matches() {
@@ -315,6 +402,55 @@ mihomo_pid_is_running() {
   printf '%s\n' "$process_text" | mihomo_process_text_matches
 }
 
+mihomo_expected_pid() {
+  local pid_file pid process_text
+  pid_file="$(mihomo_runtime_dir)/mihomo.pid"
+  if [ -f "$pid_file" ]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    case "$pid" in '' | *[!0-9]*) pid="" ;; esac
+    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+      process_text="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+      if [ -n "$process_text" ] && printf '%s\n' "$process_text" | mihomo_process_text_matches; then
+        printf '%s\n' "$pid"
+        return 0
+      fi
+    fi
+  fi
+
+  if proxy_systemd_is_active; then
+    pid="$(systemctl --user show --property MainPID --value "$(proxy_service_name)" 2>/dev/null || true)"
+    case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  return 1
+}
+
+mihomo_proxy_listener_owner_is_compatible() {
+  local proxy_url="${1:-$CODEX_PROXY_URL}" expected_pid host port output pids
+  expected_pid="$(mihomo_expected_pid)" || return 0
+  proxy_url_parse_endpoint "$proxy_url" || return 1
+  host="$PROXY_URL_HOST"
+  port="$PROXY_URL_PORT"
+
+  if command -v ss >/dev/null 2>&1; then
+    output="$(ss -H -ltnp 2>/dev/null | local_listener_output_matching_lines "$host" "$port" || true)"
+    if printf '%s\n' "$output" | grep -q 'pid='; then
+      printf '%s\n' "$output" | grep -Eq "pid=${expected_pid}([^0-9]|$)"
+      return
+    fi
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+      printf '%s\n' "$pids" | grep -Fxq "$expected_pid"
+      return
+    fi
+  fi
+  return 0
+}
+
 proxy_process_is_running() {
   {
     ps -eo comm=,args= 2>/dev/null ||
@@ -326,9 +462,9 @@ proxy_process_is_running() {
 local_proxy_is_ready() {
   local proxy_url="${1:-$CODEX_PROXY_URL}"
 
-  local_proxy_is_listening "$proxy_url" && {
-    mihomo_pid_is_running || proxy_systemd_is_active
-  }
+  { mihomo_pid_is_running || proxy_systemd_is_active; } &&
+    local_proxy_is_listening "$proxy_url" &&
+    mihomo_proxy_listener_owner_is_compatible "$proxy_url"
 }
 
 MIHOMO_CONTROLLER_STATUS="not-checked"
@@ -338,7 +474,7 @@ MIHOMO_CONTROLLER_CURRENT_NODE=""
 
 mihomo_controller_request() {
   local method="${1:-GET}" endpoint="${2:-}" request_payload="${3:-}"
-  local body_file error_file http_status curl_status url
+  local body_file error_file http_status curl_status url controller_timeout
   local -a curl_args
 
   MIHOMO_CONTROLLER_STATUS="not-checked"
@@ -351,9 +487,10 @@ mihomo_controller_request() {
   }
 
   url="${CODEX_MIHOMO_CONTROLLER_URL%/}${endpoint}"
+  controller_timeout="$(mihomo_controller_timeout_seconds)"
   body_file="$(mktemp)"
   error_file="$(mktemp)"
-  curl_args=(--noproxy '*' -sS --max-time "${CODEX_MIHOMO_CONTROLLER_TIMEOUT:-3}" -o "$body_file" -w '%{http_code}')
+  curl_args=(--noproxy '*' -sS --max-time "$controller_timeout" -o "$body_file" -w '%{http_code}')
   if [ "$method" != GET ]; then
     curl_args+=(-X "$method")
   fi
@@ -450,9 +587,37 @@ except Exception:
   printf '%s' "$payload" | "$yq_bin" eval -r '.all[]' - 2>/dev/null
 }
 
+url_path_segment_encode() {
+  local input="$1" output="" character encoded index
+  local LC_ALL=C
+
+  for ((index = 0; index < ${#input}; index++)); do
+    character="${input:index:1}"
+    case "$character" in
+      [a-zA-Z0-9.~_-]) output+="$character" ;;
+      *)
+        printf -v encoded '%%%02X' "'$character"
+        output+="$encoded"
+        ;;
+    esac
+  done
+  printf '%s\n' "$output"
+}
+
+mihomo_proxy_group_endpoint() {
+  local encoded_group
+  [ -n "${CODEX_PROXY_GROUP:-}" ] || return 1
+  encoded_group="$(url_path_segment_encode "$CODEX_PROXY_GROUP")" || return 1
+  printf '/proxies/%s\n' "$encoded_group"
+}
+
 mihomo_controller_get_proxy_group() {
-  local node
-  if ! mihomo_controller_request GET "/proxies/$CODEX_PROXY_GROUP"; then
+  local node endpoint
+  endpoint="$(mihomo_proxy_group_endpoint)" || {
+    MIHOMO_CONTROLLER_STATUS="invalid-config"
+    return 1
+  }
+  if ! mihomo_controller_request GET "$endpoint"; then
     return 1
   fi
   node="$(mihomo_proxy_group_current_from_payload "$MIHOMO_CONTROLLER_PAYLOAD")" || {
@@ -476,6 +641,7 @@ mihomo_controller_status_text() {
     timeout) printf 'Controller 响应超时' ;;
     unauthorized) printf 'Controller 认证失败' ;;
     group-not-found) printf '找不到代理组: %s' "$CODEX_PROXY_GROUP" ;;
+    invalid-config) printf '代理组名称不能为空' ;;
     invalid-response) printf 'Controller 响应无效' ;;
     http-error) printf 'Controller HTTP 错误: %s' "${MIHOMO_CONTROLLER_HTTP_STATUS:-未提供状态码}" ;;
     *) printf 'Controller 不可访问' ;;
@@ -487,17 +653,20 @@ mihomo_readiness_error_text() {
     printf 'Mihomo 未运行'
   elif ! local_proxy_is_listening "$CODEX_PROXY_URL"; then
     printf 'Mihomo 代理端口未就绪: %s' "$CODEX_PROXY_URL"
+  elif ! mihomo_proxy_listener_owner_is_compatible "$CODEX_PROXY_URL"; then
+    printf '代理端口由其他进程占用: %s' "$CODEX_PROXY_URL"
   else
     mihomo_controller_status_text
   fi
 }
 
 wait_for_mihomo_ready() {
-  local wait_seconds="${1:-${CODEX_MIHOMO_START_WAIT_SECONDS:-20}}"
-  local attempt
-  for attempt in $(seq 1 "$wait_seconds"); do
+  local wait_seconds attempt=0
+  wait_seconds="$(mihomo_start_wait_seconds)"
+  while [ "$attempt" -lt "$wait_seconds" ]; do
+    attempt=$((attempt + 1))
     mihomo_is_ready && return 0
-    [ "$attempt" -eq "$wait_seconds" ] || sleep 1
+    [ "$attempt" -ge "$wait_seconds" ] || sleep 1
   done
   return 1
 }
@@ -556,7 +725,7 @@ mihomo_binary_path() {
 }
 
 start_existing_mihomo() {
-  local runtime_dir config_dir config_file log_dir log_file pid_file mihomo_bin mihomo_pid wait_seconds
+  local runtime_dir config_dir config_file log_dir log_file pid_file mihomo_bin mihomo_pid wait_seconds attempt
 
   if mihomo_is_ready; then
     return 0
@@ -607,8 +776,8 @@ start_existing_mihomo() {
   mihomo_pid="$!"
   echo "$mihomo_pid" > "$pid_file"
 
-  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
-  for _ in $(seq 1 "$wait_seconds"); do
+  wait_seconds="$(mihomo_start_wait_seconds)"
+  for ((attempt = 1; attempt <= wait_seconds; attempt++)); do
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_warn "Mihomo 在打开代理端口前已退出"
       tail -n 40 "$log_file" >&2 || true
@@ -680,7 +849,7 @@ proxy_systemd_is_active() {
 }
 
 wait_for_local_proxy() {
-  wait_for_mihomo_ready "${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
+  wait_for_mihomo_ready
 }
 
 stop_existing_mihomo() {
@@ -731,7 +900,7 @@ proxy_enable_persistent() {
     log_ok "代理已永久开启: $CODEX_PROXY_URL"
     return 0
   fi
-  log_error "代理开启失败: $(mihomo_readiness_error_text)"
+  log_error "永久代理已设为开启，但本次 Mihomo 启动失败；后续 shell 将继续尝试恢复。原因: $(mihomo_readiness_error_text)"
   return 1
 }
 
@@ -955,7 +1124,7 @@ install_codex_cli_from_github_release() {
     max_time=240
     if [ "$mirror" = "github.com" ]; then
       retries=0
-      max_time="${GITHUB_DIRECT_MAX_TIME:-30}"
+      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 30 GITHUB_DIRECT_MAX_TIME)"
     fi
     log_info "正在从 $mirror 下载 Codex CLI"
     if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \
@@ -1190,7 +1359,7 @@ mihomo_proxy_selection_payload() {
 }
 
 function proxy-switch {
-  local current answer target payload index
+  local current answer target payload index endpoint
   local -a choices
   load_project_config
 
@@ -1250,7 +1419,11 @@ function proxy-switch {
       log_error "无法生成节点切换请求"
       return 1
     }
-    if ! mihomo_controller_request PUT "/proxies/$CODEX_PROXY_GROUP" "$payload"; then
+    endpoint="$(mihomo_proxy_group_endpoint)" || {
+      log_error "无法切换节点: 代理组名称不能为空"
+      return 1
+    }
+    if ! mihomo_controller_request PUT "$endpoint" "$payload"; then
       log_error "切换 $CODEX_PROXY_GROUP 失败: $(mihomo_controller_status_text)"
       return 1
     fi

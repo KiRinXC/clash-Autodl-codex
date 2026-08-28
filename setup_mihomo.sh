@@ -49,7 +49,7 @@ download_github_file() {
     max_time=180
     if [ "$mirror" = "github.com" ]; then
       retries=0
-      max_time="${GITHUB_DIRECT_MAX_TIME:-30}"
+      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 30 GITHUB_DIRECT_MAX_TIME)"
     fi
     log_info "正在从 $mirror 下载 $description"
     if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \
@@ -293,7 +293,7 @@ inject_proxy_settings() {
 
 start_mihomo() {
   local mihomo_bin="$1"
-  local mihomo_pid wait_seconds
+  local mihomo_pid wait_seconds attempt
 
   mkdir -p "$LOG_DIR"
   stop_existing_mihomo
@@ -302,8 +302,8 @@ start_mihomo() {
   mihomo_pid="$!"
   echo "$mihomo_pid" > "$CLASH_RUNTIME_DIR/mihomo.pid"
 
-  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
-  for _ in $(seq 1 "$wait_seconds"); do
+  wait_seconds="$(mihomo_start_wait_seconds)"
+  for ((attempt = 1; attempt <= wait_seconds; attempt++)); do
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_error "Mihomo 在打开代理端口前已退出"
       tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true

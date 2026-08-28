@@ -37,12 +37,25 @@ load_project_config
 CLASH_URL="$(prompt_required "请输入 Clash/Mihomo 订阅 URL" "${CLASH_URL:-}")"
 validate_http_url CLASH_URL "$CLASH_URL"
 export PROXY_ENABLED="true"
-save_project_config
+staged_config="$(mktemp)"
+trap 'rm -f "$staged_config"' EXIT
+CLASH_CODEX_AUTODL_CONFIG_FILE="$staged_config" save_project_config
 
+service_was_active="false"
 if user_systemd_available && [ -f "$HOME/.config/systemd/user/$(proxy_service_name)" ]; then
+  proxy_systemd_is_active && service_was_active="true"
   systemctl --user stop "$(proxy_service_name)" >/dev/null 2>&1 || true
 fi
-bash "$RUNTIME_DIR/setup_mihomo.sh" "$(project_config_file)"
+if ! bash "$RUNTIME_DIR/setup_mihomo.sh" "$staged_config"; then
+  if [ "$service_was_active" = "true" ]; then
+    stop_existing_mihomo
+    systemctl --user start "$(proxy_service_name)" >/dev/null 2>&1 || \
+      log_warn "原有代理配置已恢复，但 systemd 用户服务未能重新启动"
+  fi
+  log_error "Clash/Mihomo 安装失败；原订阅配置和代理状态已保留"
+  exit 1
+fi
+save_project_config
 install_proxy_systemd_service
 if user_systemd_available; then
   stop_existing_mihomo

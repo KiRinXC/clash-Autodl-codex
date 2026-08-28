@@ -57,17 +57,20 @@ save_codex_active_auth() {
 
 codex_binary_path() {
   local candidate
-  if [ -n "${CLASH_CODEX_AUTODL_CODEX_BINARY:-}" ] && [ -x "$CLASH_CODEX_AUTODL_CODEX_BINARY" ]; then
+  if [ -n "${CLASH_CODEX_AUTODL_CODEX_BINARY:-}" ] && \
+    codex_cli_is_usable "$CLASH_CODEX_AUTODL_CODEX_BINARY"; then
     printf '%s\n' "$CLASH_CODEX_AUTODL_CODEX_BINARY"
     return 0
   fi
   for candidate in "$HOME/.local/bin/codex" "$(project_data_dir)/bin/codex-real"; do
-    if [ -x "$candidate" ]; then
+    if codex_cli_is_usable "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
-  command -v codex 2>/dev/null || return 1
+  candidate="$(command -v codex 2>/dev/null || true)"
+  [ -n "$candidate" ] && codex_cli_is_usable "$candidate" || return 1
+  printf '%s\n' "$candidate"
 }
 
 toml_escape() {
@@ -89,7 +92,10 @@ codex_api_source_key() {
   if python_bin="$(python_command 2>/dev/null)"; then
     value="$("$python_bin" - "$file" <<'PY' 2>/dev/null || true
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(0)
 
 with open(sys.argv[1], "rb") as source:
     value = tomllib.load(source).get("api_key", "")
@@ -97,7 +103,8 @@ if isinstance(value, str):
     print(value)
 PY
 )"
-  else
+  fi
+  if [ -z "$value" ]; then
     value="$(sed -n 's/^[[:space:]]*api_key[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1)"
   fi
   [ -n "$value" ] || return 1
@@ -110,7 +117,12 @@ codex_api_source_toml_is_valid() {
   if python_bin="$(python_command 2>/dev/null)"; then
     "$python_bin" - "$file" <<'PY' >/dev/null 2>&1
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    # Python 3.10 is still common on Ubuntu 22.04. The generated file is
+    # validated again when Codex loads the extracted runtime config.
+    raise SystemExit(0)
 
 with open(sys.argv[1], "rb") as source:
     tomllib.load(source)
@@ -119,7 +131,7 @@ PY
 }
 
 codex_api_source_is_usable() {
-  local file="${1:-$(codex_api_source_file)}" raw_config status
+  local file="${1:-$(codex_api_source_file)}" raw_config status url
   [ -f "$file" ] || return 1
   codex_api_source_toml_is_valid "$file" || return 1
   codex_api_source_key "$file" >/dev/null 2>&1 || return 1
@@ -128,6 +140,13 @@ codex_api_source_is_usable() {
   codex_extract_source_config "$file" "$raw_config" >/dev/null 2>&1 || status=$?
   if [ "$status" -eq 0 ] && ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=' "$raw_config"; then
     status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    url="$(codex_config_api_url "$file")"
+    case "$url" in
+      http://* | https://*) ;;
+      *) status=1 ;;
+    esac
   fi
   rm -f "$raw_config"
   return "$status"
@@ -162,10 +181,19 @@ codex_write_api_source() {
     printf 'api_key = "%s"\n' "$(toml_escape "$key")"
     printf '%s\n' 'cli_auth_credentials_store = "file"'
     printf '%s\n' 'forced_login_method = "api"'
-    printf '%s\n' 'model_provider = "openai"'
-    if [ -n "$url" ]; then
-      printf 'openai_base_url = "%s"\n' "$(toml_escape "$url")"
-    fi
+    printf '%s\n' 'model_provider = "OpenAI"'
+    printf '%s\n' 'model = "gpt-5.6-sol"'
+    printf '%s\n' 'review_model = "gpt-5.4"'
+    printf '%s\n' 'model_reasoning_effort = "xhigh"'
+    printf '%s\n' 'model_context_window = 1000000'
+    printf '%s\n' 'model_auto_compact_token_limit = 900000'
+    printf '\n[model_providers.OpenAI]\n'
+    printf '%s\n' 'name = "OpenAI"'
+    printf 'base_url = "%s"\n' "$(toml_escape "$url")"
+    printf '%s\n' 'wire_api = "responses"'
+    printf '%s\n' 'requires_openai_auth = true'
+    printf '\n[sandbox_workspace_write]\n'
+    printf '%s\n' 'network_access = true'
   } > "$tmp"
   chmod 600 "$tmp" 2>/dev/null || true
   if ! codex_api_source_toml_is_valid "$tmp"; then
@@ -228,8 +256,8 @@ codex_inject_managed_config() {
   sqlite_home="$(toml_escape "$(codex_shared_sqlite_dir)")"
   CODEX_SHARED_SQLITE_HOME="$sqlite_home" awk '
     function managed() { print "sqlite_home = \"" ENVIRON["CODEX_SHARED_SQLITE_HOME"] "\"" }
+    /^[[:space:]]*sqlite_home[[:space:]]*=/ { next }
     !inserted && /^[[:space:]]*\[/ { managed(); print ""; inserted = 1 }
-    !inserted && /^[[:space:]]*sqlite_home[[:space:]]*=/ { next }
     { print }
     END { if (!inserted) managed() }
   ' "$source" > "$output"
@@ -251,7 +279,7 @@ replace_codex_profile_dir() {
 }
 
 apply_codex_api_source() {
-  local source root pending raw_config key codex_bin
+  local source root pending raw_config key codex_bin url
   source="$(codex_api_source_file)"
   [ -f "$source" ] || { log_error "API 配置不存在: $source"; return 1; }
   codex_api_source_toml_is_valid "$source" || {
@@ -261,6 +289,11 @@ apply_codex_api_source() {
   }
   key="$(codex_api_source_key "$source")" || {
     log_error "API 配置中的 api_key 不能为空"
+    return 1
+  }
+  url="$(codex_config_api_url "$source")"
+  validate_http_url CODEX_API_BASE_URL "$url" || {
+    unset key
     return 1
   }
   codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
@@ -283,6 +316,7 @@ apply_codex_api_source() {
     log_error "Codex CLI 未能保存 API 凭据；原运行配置未修改"
     return 1
   fi
+  chmod 600 "$pending/auth.json" 2>/dev/null || true
   unset key
   replace_codex_profile_dir api "$pending" || return 1
   log_ok "API 配置已保存（尚未进行模型调用验证）"
@@ -313,16 +347,24 @@ configure_codex_api_initial() {
 }
 
 configure_codex_chatgpt_profile() {
-  local root pending codex_bin raw
+  local root pending codex_bin raw old_config
   codex_bin="$(codex_binary_path)" || { log_error "未找到 Codex CLI"; return 1; }
   root="$(codex_profiles_dir)"
   mkdir -p "$root"
   pending="$(mktemp -d "$root/.chatgpt.pending.XXXXXX")"
   raw="$(mktemp)"
+  old_config="$(codex_profile_home chatgpt)/config.toml"
   {
     printf '%s\n' 'cli_auth_credentials_store = "file"'
     printf '%s\n' 'forced_login_method = "chatgpt"'
     printf '%s\n' 'model_provider = "openai"'
+    if [ -s "$old_config" ]; then
+      printf '\n'
+      awk '
+        /^[[:space:]]*(cli_auth_credentials_store|forced_login_method|model_provider|sqlite_home)[[:space:]]*=/ { next }
+        { print }
+      ' "$old_config"
+    fi
   } > "$raw"
   codex_inject_managed_config "$raw" "$pending/config.toml"
   rm -f "$raw"
@@ -333,6 +375,7 @@ configure_codex_chatgpt_profile() {
     log_error "ChatGPT 登录失败；原配置未修改"
     return 1
   fi
+  chmod 600 "$pending/auth.json" 2>/dev/null || true
   replace_codex_profile_dir chatgpt "$pending" || return 1
   log_ok "ChatGPT 登录已保存"
 }

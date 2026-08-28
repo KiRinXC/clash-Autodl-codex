@@ -12,6 +12,7 @@ BIN_DIR="$CLASH_RUNTIME_DIR/bin"
 CONF_DIR="$CLASH_RUNTIME_DIR/conf"
 LOG_DIR="$CLASH_RUNTIME_DIR/logs"
 CONFIG_FILE="$CONF_DIR/config.yaml"
+WORK_CONFIG_FILE=""
 GEOIP_METADB_FILE="$CONF_DIR/geoip.metadb"
 YQ_BINARY="$BIN_DIR/yq"
 MIHOMO_BINARY=""
@@ -139,9 +140,8 @@ install_yq() {
 }
 
 install_mihomo() {
-  local arch temp_file target_file
+  local arch temp_file temp_binary target_file
   arch="$(arch_name)"
-  temp_file="/tmp/mihomo-${arch}.gz"
   target_file="$BIN_DIR/mihomo-linux-${arch}"
   mkdir -p "$BIN_DIR"
 
@@ -150,8 +150,14 @@ install_mihomo() {
     return 0
   fi
 
-  download_github_file "/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-${arch}-compatible-v${MIHOMO_VERSION}.gz" "$temp_file" "Mihomo（二进制，架构 $arch）"
-  gzip -d -c "$temp_file" > "$target_file"
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/clash-codex-mihomo-${arch}.XXXXXX.gz")"
+  temp_binary="$(mktemp "$BIN_DIR/.mihomo-${arch}.XXXXXX")"
+  if ! download_github_file "/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-${arch}-compatible-v${MIHOMO_VERSION}.gz" "$temp_file" "Mihomo（二进制，架构 $arch）" || \
+    ! gzip -d -c "$temp_file" > "$temp_binary"; then
+    rm -f "$temp_file" "$temp_binary"
+    return 1
+  fi
+  mv "$temp_binary" "$target_file"
   chmod +x "$target_file"
   rm -f "$temp_file"
   MIHOMO_BINARY="$target_file"
@@ -175,42 +181,55 @@ geoip_metadb_is_ready() {
 }
 
 install_geoip_metadb() {
+  local pending
   mkdir -p "$CONF_DIR"
 
   if geoip_metadb_is_ready "$GEOIP_METADB_FILE"; then
     return 0
   fi
 
-  if [ -f "$GEOIP_METADB_FILE" ]; then
-    log_warn "Mihomo GeoIP 数据库不完整，正在重新下载"
-    rm -f "$GEOIP_METADB_FILE"
+  [ ! -f "$GEOIP_METADB_FILE" ] || log_warn "Mihomo GeoIP 数据库不完整，正在重新下载"
+  pending="$(mktemp "$CONF_DIR/.geoip.pending.XXXXXX")"
+  if ! download_github_file "/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" "$pending" "Mihomo GeoIP 数据库"; then
+    rm -f "$pending"
+    return 1
   fi
 
-  download_github_file "/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" "$GEOIP_METADB_FILE" "Mihomo GeoIP 数据库"
-
-  if ! geoip_metadb_is_ready "$GEOIP_METADB_FILE"; then
+  if ! geoip_metadb_is_ready "$pending"; then
+    rm -f "$pending"
     log_error "Mihomo GeoIP 数据库下载不完整"
     return 1
   fi
+  mv "$pending" "$GEOIP_METADB_FILE"
 }
 
 download_subscription() {
   mkdir -p "$CONF_DIR"
   log_info "正在下载 Clash/Mihomo 订阅"
-  curl -fL --retry 5 --connect-timeout 15 --max-time 120 -o "$CONFIG_FILE" "$CLASH_URL"
-  log_ok "订阅已下载到 $CONFIG_FILE"
+  curl -fL --retry 5 --connect-timeout 15 --max-time 120 -o "$WORK_CONFIG_FILE" "$CLASH_URL"
+  chmod 600 "$WORK_CONFIG_FILE" 2>/dev/null || true
+  log_ok "订阅已下载并暂存"
 }
 
 convert_if_needed() {
-  if "$YQ_BINARY" eval '.proxies | length' "$CONFIG_FILE" >/dev/null 2>&1; then
-    return 0
-  fi
+  local proxy_count
+  proxy_count="$("$YQ_BINARY" eval '.proxies | length' "$WORK_CONFIG_FILE" 2>/dev/null || true)"
+  case "$proxy_count" in
+    '' | *[!0-9]*) ;;
+    *) return 0 ;;
+  esac
 
   if [ -x "$SCRIPT_DIR/converter.sh" ] || [ -f "$SCRIPT_DIR/converter.sh" ]; then
     log_warn "订阅不是有效的 Clash YAML，正在尝试使用 converter.sh 转换"
-    bash "$SCRIPT_DIR/converter.sh" "$CONFIG_FILE" "$CONFIG_FILE"
-    "$YQ_BINARY" eval '.proxies | length' "$CONFIG_FILE" >/dev/null
-    return 0
+    bash "$SCRIPT_DIR/converter.sh" "$WORK_CONFIG_FILE" "$WORK_CONFIG_FILE"
+    proxy_count="$("$YQ_BINARY" eval '.proxies | length' "$WORK_CONFIG_FILE" 2>/dev/null || true)"
+    case "$proxy_count" in
+      '' | *[!0-9]*)
+        log_error "转换结果不是有效的 Clash YAML"
+        return 1
+        ;;
+      *) return 0 ;;
+    esac
   fi
 
   log_error "订阅不是有效的 Clash YAML，且缺少 converter.sh"
@@ -226,6 +245,14 @@ inject_proxy_settings() {
   proxy_port="$(url_port_from_url "$CODEX_PROXY_URL")" || return 1
   controller_bind="$(controller_bind_from_url "$CODEX_MIHOMO_CONTROLLER_URL")" || return 1
 
+  proxy_count="$("$YQ_BINARY" eval '.proxies | length' "$WORK_CONFIG_FILE" 2>/dev/null || echo 0)"
+  case "$proxy_count" in
+    '' | *[!0-9]* | 0)
+      log_error "转换后的订阅中没有找到可用代理节点"
+      return 1
+      ;;
+  esac
+
   CODEX_PROXY_PORT="$proxy_port" \
   CODEX_MIHOMO_CONTROLLER_BIND="$controller_bind" \
   CODEX_PROXY_GROUP_NAME="$CODEX_PROXY_GROUP" "$YQ_BINARY" eval -i '
@@ -238,17 +265,11 @@ inject_proxy_settings() {
       [{
         "name": strenv(CODEX_PROXY_GROUP_NAME),
         "type": "select",
-        "proxies": ((.proxies // []) | map(.name))
+        "proxies": ((["DIRECT"] + ((.proxies // []) | map(.name))) | unique)
       }] +
       ((."proxy-groups" // []) | map(select(.name != strenv(CODEX_PROXY_GROUP_NAME))))
     )
-  ' "$CONFIG_FILE"
-
-  proxy_count="$(CODEX_PROXY_GROUP_NAME="$CODEX_PROXY_GROUP" "$YQ_BINARY" eval '."proxy-groups"[] | select(.name == strenv(CODEX_PROXY_GROUP_NAME)) | (.proxies // []) | length' "$CONFIG_FILE" 2>/dev/null || echo 0)"
-  if [ "${proxy_count:-0}" -eq 0 ]; then
-    log_error "转换后的订阅中没有找到可用代理节点"
-    return 1
-  fi
+  ' "$WORK_CONFIG_FILE"
 
   log_ok "已配置代理选择组: $CODEX_PROXY_GROUP"
 }
@@ -283,6 +304,36 @@ start_mihomo() {
   return 1
 }
 
+activate_config_and_start() {
+  local backup_file had_previous="false"
+  backup_file="$(mktemp "$CONF_DIR/.config.backup.XXXXXX")"
+  if [ -f "$CONFIG_FILE" ]; then
+    cp -p "$CONFIG_FILE" "$backup_file"
+    had_previous="true"
+  fi
+
+  mv "$WORK_CONFIG_FILE" "$CONFIG_FILE"
+  WORK_CONFIG_FILE=""
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  if start_mihomo "$MIHOMO_BINARY"; then
+    rm -f "$backup_file"
+    return 0
+  fi
+
+  stop_existing_mihomo
+  rm -f "$CONFIG_FILE"
+  if [ "$had_previous" = "true" ]; then
+    mv "$backup_file" "$CONFIG_FILE"
+    log_warn "新配置启动失败，已恢复原有 Clash 配置"
+    if ! start_mihomo "$MIHOMO_BINARY"; then
+      log_error "原有 Clash 配置已恢复，但 Mihomo 未能重新启动"
+    fi
+  else
+    rm -f "$backup_file"
+  fi
+  return 1
+}
+
 if [ "${1:-}" = "--help" ]; then
   usage
   exit 0
@@ -297,10 +348,14 @@ if [ -z "${CLASH_URL:-}" ]; then
   exit 1
 fi
 
+mkdir -p "$CONF_DIR"
+WORK_CONFIG_FILE="$(mktemp "$CONF_DIR/.config.pending.XXXXXX")"
+trap '[ -z "${WORK_CONFIG_FILE:-}" ] || rm -f "$WORK_CONFIG_FILE"' EXIT
+
 install_yq
 download_subscription
 convert_if_needed
 inject_proxy_settings
 install_mihomo
 install_geoip_metadb
-start_mihomo "$MIHOMO_BINARY"
+activate_config_and_start

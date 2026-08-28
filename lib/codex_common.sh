@@ -406,7 +406,8 @@ start_existing_mihomo() {
 
   if [ -f "$pid_file" ]; then
     mihomo_pid="$(cat "$pid_file" 2>/dev/null || true)"
-    if [ -n "${mihomo_pid:-}" ] && kill -0 "$mihomo_pid" >/dev/null 2>&1; then
+    if [ -n "${mihomo_pid:-}" ] && kill -0 "$mihomo_pid" >/dev/null 2>&1 && \
+      ps -p "$mihomo_pid" -o comm= -o args= 2>/dev/null | mihomo_process_text_matches; then
       log_warn "Mihomo 进程存在但未监听 $CODEX_PROXY_URL，正在重启"
       kill "$mihomo_pid" >/dev/null 2>&1 || true
       sleep 1
@@ -506,7 +507,8 @@ stop_existing_mihomo() {
     case "$pid" in
       '' | *[!0-9]*) ;;
       *)
-        if kill -0 "$pid" >/dev/null 2>&1; then
+        if kill -0 "$pid" >/dev/null 2>&1 && \
+          ps -p "$pid" -o comm= -o args= 2>/dev/null | mihomo_process_text_matches; then
           kill "$pid" >/dev/null 2>&1 || true
           for _ in 1 2 3 4 5; do
             kill -0 "$pid" >/dev/null 2>&1 || break
@@ -682,9 +684,34 @@ codex_install_manifest() {
   printf '%s/install-manifest\n' "${CLASH_CODEX_AUTODL_DATA_DIR:-$HOME/.local/share/clash-codex-autodl}"
 }
 
-record_project_codex_install() {
+file_fingerprint() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print "sha256:" $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print "sha256:" $1}'
+  else
+    cksum "$path" | awk '{print "cksum:" $1 ":" $2}'
+  fi
+}
+
+codex_cli_is_usable() {
   local binary_path="$1"
-  local manifest tmp_file
+  [ -x "$binary_path" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 "$binary_path" --version >/dev/null 2>&1
+  else
+    "$binary_path" --version >/dev/null 2>&1
+  fi
+}
+
+record_project_codex_install() {
+  local binary_path="$1" method="${2:-binary}"
+  local manifest tmp_file fingerprint
+  fingerprint="$(file_fingerprint "$binary_path")" || {
+    log_error "无法记录 Codex CLI 文件指纹: $binary_path"
+    return 1
+  }
   manifest="$(codex_install_manifest)"
   mkdir -p "$(dirname "$manifest")"
   tmp_file="$(mktemp "${manifest}.tmp.XXXXXX")"
@@ -694,6 +721,12 @@ record_project_codex_install() {
     printf '\n'
     printf 'CODEX_BINARY_PATH='
     shell_single_quote "$binary_path"
+    printf '\n'
+    printf 'CODEX_BINARY_FINGERPRINT='
+    shell_single_quote "$fingerprint"
+    printf '\n'
+    printf 'CODEX_INSTALL_METHOD='
+    shell_single_quote "$method"
     printf '\n'
   } > "$tmp_file"
   chmod 600 "$tmp_file" 2>/dev/null || true
@@ -760,9 +793,14 @@ install_codex_cli_from_github_release() {
         if [ -n "$codex_binary" ]; then
           cp "$codex_binary" "$HOME/.local/bin/codex"
           chmod +x "$HOME/.local/bin/codex"
-          rm -rf "$tmp_dir"
           ensure_local_bin_on_path
-          record_project_codex_install "$HOME/.local/bin/codex"
+          if ! codex_cli_is_usable "$HOME/.local/bin/codex"; then
+            log_warn "下载的 Codex CLI 无法运行"
+            rm -f "$HOME/.local/bin/codex"
+            continue
+          fi
+          record_project_codex_install "$HOME/.local/bin/codex" github-release
+          rm -rf "$tmp_dir"
           log_ok "已通过 GitHub Release 安装 Codex CLI: $HOME/.local/bin/codex"
           return 0
         fi
@@ -780,16 +818,19 @@ ensure_codex_cli() {
 
   if command -v codex >/dev/null 2>&1; then
     existing="$(command -v codex)"
-    log_ok "已找到现有 Codex CLI: $existing"
-    log_info "将复用该 Codex CLI；本项目只安装 codex-* 管理命令和独立认证配置，不会覆盖它"
-    return 0
+    if codex_cli_is_usable "$existing"; then
+      log_ok "已找到现有 Codex CLI: $existing"
+      log_info "将复用该 Codex CLI；本项目只安装 codex-* 管理命令和独立认证配置，不会覆盖它"
+      return 0
+    fi
+    log_warn "发现 codex 命令但无法运行，将继续安装可用的 Codex CLI: $existing"
   fi
 
   log_info "未找到 Codex CLI，尝试官方独立安装器"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL --connect-timeout 10 --max-time 60 https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh; then
-      if command -v codex >/dev/null 2>&1; then
-        record_project_codex_install "$(command -v codex)"
+      if command -v codex >/dev/null 2>&1 && codex_cli_is_usable "$(command -v codex)"; then
+        record_project_codex_install "$(command -v codex)" official-installer
         log_ok "已通过官方独立安装器安装 Codex CLI"
         return 0
       fi
@@ -806,8 +847,8 @@ ensure_codex_cli() {
   log_info "尝试使用 npm 方式安装 @openai/codex"
   if command -v npm >/dev/null 2>&1; then
     npm install -g @openai/codex
-    if command -v codex >/dev/null 2>&1; then
-      record_project_codex_install "$(command -v codex)"
+    if command -v codex >/dev/null 2>&1 && codex_cli_is_usable "$(command -v codex)"; then
+      record_project_codex_install "$(command -v codex)" npm
       log_ok "已通过 npm 安装 Codex CLI"
       return 0
     fi
@@ -868,8 +909,10 @@ EOF
 }
 
 install_proxy_shell_hook() {
-  local config_dir hook_file command_path
+  local config_dir data_dir bin_dir hook_file command_path
   config_dir="$(project_config_dir)"
+  data_dir="${CLASH_CODEX_AUTODL_DATA_DIR:-$HOME/.local/share/clash-codex-autodl}"
+  bin_dir="${CLASH_CODEX_AUTODL_USER_BIN_DIR:-$HOME/.local/bin}"
   hook_file="$config_dir/proxy-shell-init.sh"
   command_path="$(internal_command_path)"
   mkdir -p "$config_dir"
@@ -879,7 +922,9 @@ install_proxy_shell_hook() {
 # 由 clash-codex-autodl 管理
 export CLASH_CODEX_AUTODL_CONFIG_DIR="$config_dir"
 export CODEX_AUTODL_CONFIG_DIR="$config_dir"
-export PATH="$HOME/.local/bin:\$PATH"
+export CLASH_CODEX_AUTODL_DATA_DIR="$data_dir"
+export CLASH_CODEX_AUTODL_USER_BIN_DIR="$bin_dir"
+export PATH="$bin_dir:\$PATH"
 proxy-on() { "$command_path" proxy enable && eval "\$("$command_path" proxy env)"; }
 proxy-off() { "$command_path" proxy disable; eval "\$("$command_path" proxy env-off)"; }
 proxy-switch() { "$command_path" proxy switch; }
@@ -899,8 +944,10 @@ EOF
 }
 
 install_codex_shell_hook() {
-  local config_dir hook_file command_path
+  local config_dir data_dir bin_dir hook_file command_path
   config_dir="$(project_config_dir)"
+  data_dir="${CLASH_CODEX_AUTODL_DATA_DIR:-$HOME/.local/share/clash-codex-autodl}"
+  bin_dir="${CLASH_CODEX_AUTODL_USER_BIN_DIR:-$HOME/.local/bin}"
   hook_file="$config_dir/codex-shell-init.sh"
   command_path="$(internal_command_path)"
   mkdir -p "$config_dir"
@@ -908,7 +955,11 @@ install_codex_shell_hook() {
 
   cat > "$hook_file" <<EOF
 # 由 clash-codex-autodl 管理
-export PATH="$HOME/.local/bin:\$PATH"
+export CLASH_CODEX_AUTODL_CONFIG_DIR="$config_dir"
+export CODEX_AUTODL_CONFIG_DIR="$config_dir"
+export CLASH_CODEX_AUTODL_DATA_DIR="$data_dir"
+export CLASH_CODEX_AUTODL_USER_BIN_DIR="$bin_dir"
+export PATH="$bin_dir:\$PATH"
 codex() { "$command_path" run "\$@"; }
 codex-status() { "$command_path" codex status; }
 codex-verify() { "$command_path" codex verify; }
@@ -971,10 +1022,11 @@ import urllib.request
 
 base = os.environ.get("CODEX_MIHOMO_CONTROLLER_URL", "http://127.0.0.1:6006").rstrip("/")
 group = os.environ.get("CODEX_PROXY_GROUP", "CodexProxy")
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def fetch_state():
-    with urllib.request.urlopen(f"{base}/proxies/{group}", timeout=10) as resp:
+    with opener.open(f"{base}/proxies/{group}", timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -986,16 +1038,16 @@ def set_proxy(name):
         method="PUT",
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with opener.open(req, timeout=10) as resp:
         resp.read()
 
 
 def render_state(state):
     current = state.get("now") or "DIRECT"
     all_names = state.get("all") or []
-    choices = ["DIRECT"]
+    choices = []
     for name in all_names:
-        if name != "DIRECT" and name not in choices:
+        if name not in choices:
             choices.append(name)
     print(f"当前选择: {current}")
     print(f"选择组: {group}")

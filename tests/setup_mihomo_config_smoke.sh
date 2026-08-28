@@ -48,6 +48,7 @@ if [ "${1:-}" = "eval" ]; then
   query="${2:-}"
   case "$query" in
     '.proxies | length')
+      printf '1\n'
       exit 0
       ;;
     *CODEX_PROXY_GROUP_NAME*length*)
@@ -88,10 +89,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "$output_file" ]; then
-  if [ "${output_file##*/}" = "geoip.metadb" ]; then
-    dd if=/dev/zero of="$output_file" bs=1048576 count=6 >/dev/null 2>&1
-    exit 0
-  fi
+  case "${output_file##*/}" in
+    geoip.metadb | .geoip.pending.*)
+      dd if=/dev/zero of="$output_file" bs=1048576 count=6 >/dev/null 2>&1
+      exit 0
+      ;;
+  esac
 
   cat > "$output_file" <<'YAML'
 proxies:

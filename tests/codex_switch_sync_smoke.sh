@@ -52,6 +52,11 @@ env "${env_args[@]}" "$tmp_bin/codex-switch" >/dev/null
 [ -s "$tmp_data/codex-homes/chatgpt/auth.json" ]
 grep -q '"model_provider":"openai"' "$shared/sessions/2026/01/01/rollout-test.jsonl"
 
+printf '%s\n' 'model = "chatgpt-preserved-model"' >> "$tmp_data/codex-homes/chatgpt/config.toml"
+env "${env_args[@]}" "$tmp_bin/codex-config" >/dev/null
+grep -q '^model = "chatgpt-preserved-model"$' "$tmp_data/codex-homes/chatgpt/config.toml"
+grep -q '^forced_login_method = "chatgpt"$' "$tmp_data/codex-homes/chatgpt/config.toml"
+
 sed -i 's/model_provider = "openai"/model_provider = "custom-chat"/' \
   "$tmp_data/codex-homes/chatgpt/config.toml"
 env "${env_args[@]}" "$tmp_bin/codex-switch" >/dev/null

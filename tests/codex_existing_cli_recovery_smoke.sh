@@ -64,7 +64,9 @@ TOML
   [ ! -e "$data/install-manifest" ]
   [ -x "$bin/codex-status" ]
   grep -q '^api_key = "new-test-key"$' "$config/api-profile.toml"
-  grep -q '^openai_base_url = "https://new-api.example.invalid/v1"$' "$config/api-profile.toml"
+  grep -q '^model_provider = "OpenAI"$' "$config/api-profile.toml"
+  grep -q '^model = "gpt-5.6-sol"$' "$config/api-profile.toml"
+  grep -q '^base_url = "https://new-api.example.invalid/v1"$' "$config/api-profile.toml"
   find "$config" -maxdepth 1 -type f -name 'api-profile.toml.invalid.*' -print -quit | grep -q .
   grep -q '^login --with-api-key$' "$log"
 
@@ -108,7 +110,7 @@ TOML
   grep -q '^api_key = "preserved-test-key"$' "$config/api-profile.toml"
   grep -q '^openai_base_url = "https://preserved-api.example.invalid/v1"$' "$config/api-profile.toml"
   ! grep -q '^sqlite_home' "$config/api-profile.toml"
-  [ ! -s "$log" ]
+  ! grep -q '^login ' "$log"
 }
 
 run_interrupted_case() {

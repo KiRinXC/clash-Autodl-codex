@@ -37,7 +37,7 @@ bash install-clash.sh
 
 `proxy-on` 和 `proxy-off` 在已经加载 shell hook 的终端中也会立即修改当前终端环境。作为外部脚本直接执行时，子进程无法修改父 shell；这种情况下重新打开终端即可应用环境变化。
 
-重新运行 `bash install-clash.sh` 可以修改订阅 URL 或重新安装 Clash，不影响 Codex 数据。
+重新运行 `bash install-clash.sh` 可以修改订阅 URL 或重新安装 Clash，不影响 Codex 数据。新订阅会先在临时文件中完成转换和检查，Mihomo 成功启动后才替换现有配置；下载、转换或启动失败时会恢复原配置和代理进程。
 
 ## Codex 安装
 
@@ -47,7 +47,7 @@ bash install-codex.sh
 
 如果 `PATH` 中已经存在可用的 Codex CLI，脚本会直接复用它，不会覆盖该程序，也不会在卸载项目组件时删除它；只有找不到 Codex 时才会尝试安装。无论 Codex CLI 是预先安装还是由本项目安装，都需要执行一次上面的脚本，以部署本项目自己的 `codex-*` 管理命令、shell hook 和双认证配置。这些命令不是 Codex CLI 自带的。
 
-管理命令会先安装，再等待输入 API 地址和 API Key。因此配置输入意外中断后，重新打开终端仍可使用 `codex-status` 查看状态，并可重新运行 `bash install-codex.sh` 继续配置。默认配置使用 `model_provider = "openai"`。
+脚本会先用 `codex --version` 确认可执行文件确实可用，再安装管理命令并等待输入 API 地址和 API Key。因此配置输入意外中断后，重新打开终端仍可使用 `codex-status` 查看状态，并可重新运行 `bash install-codex.sh` 继续配置。API 默认使用自定义 Provider ID `OpenAI`，ChatGPT 登录使用内置 Provider ID `openai`；两者不同是正常的。
 
 API Key 使用隐藏输入，右键粘贴后终端不会显示星号或任何字符，按 Enter 即可。脚本会清理常见的终端括号粘贴标记和 `CR` 字符；如果第一次粘贴没有生效，可以直接重试，提示信息不会写入 Key。
 
@@ -64,7 +64,7 @@ API Key 使用隐藏输入，右键粘贴后终端不会显示星号或任何字
 | `codex-config` | API 打开单文件配置；ChatGPT 重新执行设备登录 |
 | `codex ...` | 使用当前配置运行 Codex CLI |
 
-首次从 API 切换到 ChatGPT 时，`codex-switch` 会运行设备登录。之后两套配置之间直接切换。
+首次从 API 切换到 ChatGPT 时，`codex-switch` 会运行设备登录。之后两套配置之间直接切换。当前为 ChatGPT 时运行 `codex-config` 会重新登录，但会保留原配置中的模型等非认证设置。
 
 ### API 单文件配置
 
@@ -82,9 +82,24 @@ API 用户数据保存在：
 api_key = "your-key"
 cli_auth_credentials_store = "file"
 forced_login_method = "api"
-model_provider = "openai"
-openai_base_url = "https://example.com/v1"
+model_provider = "OpenAI"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "https://example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[sandbox_workspace_write]
+network_access = true
 ```
+
+上述默认项通过当前 Codex CLI 的严格配置检查。旧配置中的顶层 `disable_response_storage`、`network_access = "enabled"` 和 `windows_wsl_setup_acknowledged` 已不被当前严格模式接受，因此不再自动写入；联网权限使用当前的 `sandbox_workspace_write.network_access = true`。
 
 该文件本身是合法 TOML。`codex-config` 按 `CODEX_CONFIG_EDITOR`、`VISUAL`、`EDITOR`、`nano`、`vim`、`vi` 的顺序选择编辑器。保存后，脚本会将除 `api_key` 以外的内容生成运行用 `config.toml`，并让当前 Codex CLI 生成 `auth.json`。
 
@@ -113,8 +128,8 @@ bash uninstall.sh data
 ```
 
 - `clash`：停止并卸载 Mihomo、代理命令和服务，保留订阅 URL。
-- `codex`：卸载本项目安全管理的 Codex CLI 和包装命令，保留 API、ChatGPT 和会话数据。
-- `data`：列出并永久删除订阅、双认证配置、会话、附件和迁移备份，需要输入 `DELETE` 二次确认。
+- `codex`：卸载本项目安全管理且文件指纹未发生变化的 Codex CLI 和包装命令，保留 API、ChatGPT 和会话数据；预先存在或后来被替换的 Codex CLI 不会删除。
+- `data`：列出并永久删除订阅、Mihomo 运行配置和日志、双认证配置、会话、附件和迁移备份，需要输入 `DELETE` 二次确认。如果组件仍在安装状态，管理命令和 shell hook 会保留，代理会关闭，新终端显示 Codex 未配置；重新运行相应安装脚本即可配置。
 
 自动化环境可以明确使用 `bash uninstall.sh data --yes`。用户原有的 `~/.codex` 始终不会被删除或覆盖。
 
@@ -138,4 +153,7 @@ bash uninstall.sh data
 find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 shellcheck command.sh install-clash.sh install-codex.sh uninstall.sh setup_mihomo.sh converter.sh lib/*.sh
 for test_file in tests/*.sh; do bash "$test_file"; done
+
+# 额外下载当前官方 Codex CLI，使用本地无效地址和测试 Key 验证真实安装/认证/严格配置解析/卸载
+RUN_REAL_CODEX_E2E=true bash tests/real_codex_cli_e2e.sh
 ```

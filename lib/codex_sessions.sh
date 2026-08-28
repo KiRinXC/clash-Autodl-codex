@@ -28,8 +28,8 @@ codex_session_sync_is_initialized() {
 }
 
 codex_process_is_running() {
-  ps -eo pid=,comm= 2>/dev/null | awk -v self="$$" '
-    $1 != self && $2 ~ /^(codex|codex-cli)$/ { found = 1 }
+  ps -eo pid=,comm=,args= 2>/dev/null | awk -v self="$$" '
+    $1 != self && ($2 ~ /^(codex|codex-cli)$/ || $0 ~ /(^|[[:space:]])codex(-cli)?([[:space:]]|$)/ || $0 ~ /\/@openai\/codex\/[^[:space:]]*/) { found = 1 }
     END { exit found ? 0 : 1 }
   '
 }
@@ -363,8 +363,10 @@ codex_initialize_session_sync() {
 codex_session_rollout_count() {
   local shared
   shared="$(codex_shared_state_dir)"
-  find "$shared/sessions" "$shared/archived_sessions" -type f -name 'rollout-*.jsonl' \
-    2>/dev/null | wc -l | tr -d '[:space:]'
+  {
+    find "$shared/sessions" "$shared/archived_sessions" -type f -name 'rollout-*.jsonl' \
+      2>/dev/null || true
+  } | wc -l | tr -d '[:space:]'
 }
 
 codex_sessions_status() {

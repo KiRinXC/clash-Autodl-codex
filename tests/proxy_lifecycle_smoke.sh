@@ -35,12 +35,33 @@ cat > "$fake_bin/systemctl" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-chmod +x "$fake_bin/ss" "$fake_bin/systemctl"
+cat > "$fake_bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+method="GET"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$method" = PUT ]; then
+  : > "$output"
+  printf '204'
+else
+  printf '%s\n' '{"name":"CodexProxy","now":"Node A","all":["Node A","DIRECT"]}' > "$output"
+  printf '200'
+fi
+SH
+chmod +x "$fake_bin/ss" "$fake_bin/systemctl" "$fake_bin/curl"
 
 cat > "$tmp_config/config.sh" <<'EOF'
 CLASH_URL='https://subscription.example.invalid/clash.yaml'
 CODEX_PROXY_URL='http://127.0.0.1:17890'
-CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:9'
+CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:6006'
 CODEX_PROXY_GROUP='CodexProxy'
 PROXY_ENABLED='false'
 EOF
@@ -53,13 +74,15 @@ kill -0 "$pid"
 env_output="$(env "${env_args[@]}" "$runtime/command.sh" proxy env)"
 grep -q 'export http_proxy=' <<< "$env_output"
 shell_output="$(env "${env_args[@]}" CODEX_MIHOMO_START_WAIT_SECONDS=1 "$runtime/command.sh" proxy shell-start 2>&1)"
-grep -q '\[proxy\] 已开启 | 节点: unknown' <<< "$shell_output"
+grep -q '\[proxy\] 已开启 | 节点: Node A' <<< "$shell_output"
+if grep -q 'unknown' <<< "$shell_output"; then exit 1; fi
 
 env "${env_args[@]}" "$runtime/command.sh" proxy disable >/dev/null
 grep -q "PROXY_ENABLED='false'" "$tmp_config/config.sh"
-! kill -0 "$pid" >/dev/null 2>&1
+if kill -0 "$pid" >/dev/null 2>&1; then exit 1; fi
 status_output="$(env "${env_args[@]}" "$runtime/command.sh" proxy status 2>&1)"
-grep -q '当前节点: unknown' <<< "$status_output"
+grep -q 'Controller 状态: Controller 不可访问' <<< "$status_output"
+if grep -q 'unknown' <<< "$status_output"; then exit 1; fi
 disabled_output="$(env "${env_args[@]}" "$runtime/command.sh" proxy shell-start 2>&1)"
 grep -q '\[proxy\] 已关闭' <<< "$disabled_output"
 

@@ -40,12 +40,23 @@ cat > "$fake_bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 output=""
+write_status="false"
+url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) output="$2"; shift 2 ;;
+    -w) write_status="true"; shift 2 ;;
+    http://* | https://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+case "$url" in
+  */proxies/CodexProxy)
+    printf '%s\n' '{"name":"CodexProxy","now":"Node A","all":["Node A","DIRECT"]}' > "$output"
+    [ "$write_status" != "true" ] || printf '200'
+    exit 0
+    ;;
+esac
 cat > "$output" <<'YAML'
 proxies:
   - name: Node A

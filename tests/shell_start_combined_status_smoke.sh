@@ -42,7 +42,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         now = open(state_file, encoding="utf-8").read().strip()
-        body = json.dumps({"now": now, "all": ["DIRECT", "Node A", "Node B"]}).encode()
+        body = json.dumps({
+            "name": "CodexProxy",
+            "now": now,
+            "all": ["Node A", "Node B", "DIRECT"],
+        }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -130,7 +134,7 @@ grep -q '^\[proxy\] 已开启 | 节点: Node A$' <<< "$terminal_status"
 grep -q '^\[codex\] API | https://api.example.invalid/v1$' <<< "$terminal_status"
 grep -q '^\[sync\] 已同步 | 0 个会话$' <<< "$terminal_status"
 
-switch_output="$(printf '3\n' | env -i HOME="$home" PATH="$bin:/usr/bin:/bin" \
+switch_output="$(printf '2\n' | env -i HOME="$home" PATH="$bin:/usr/bin:/bin" \
   CLASH_CODEX_AUTODL_CONFIG_DIR="$config" CLASH_CODEX_AUTODL_DATA_DIR="$data" \
   HTTPS_PROXY='http://127.0.0.1:1' "$bin/proxy-switch")"
 grep -q '已选择: Node B' <<< "$switch_output"

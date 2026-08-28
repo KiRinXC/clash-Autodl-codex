@@ -76,11 +76,21 @@ cat > "$fake_bin/curl" <<'SH'
 set -euo pipefail
 
 output_file=""
+write_status="false"
+url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o)
       output_file="$2"
       shift 2
+      ;;
+    -w)
+      write_status="true"
+      shift 2
+      ;;
+    http://* | https://*)
+      url="$1"
+      shift
       ;;
     *)
       shift
@@ -89,6 +99,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "$output_file" ]; then
+  if [ "$write_status" = "true" ]; then
+    printf '%s\n' '{"name":"CodexProxy","now":"Node A","all":["Node A","DIRECT"]}' > "$output_file"
+    printf '200'
+    exit 0
+  fi
   case "${output_file##*/}" in
     geoip.metadb | .geoip.pending.*)
       dd if=/dev/zero of="$output_file" bs=1048576 count=6 >/dev/null 2>&1

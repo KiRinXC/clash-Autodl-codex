@@ -117,8 +117,22 @@ url_host_from_url() {
 controller_bind_from_url() {
   local host port
 
+  case "$1" in
+    http://*) ;;
+    *)
+      log_error "Mihomo Controller URL 必须使用本机 http:// 地址"
+      return 1
+      ;;
+  esac
   host="$(url_host_from_url "$1")" || return 1
   port="$(url_port_from_url "$1")" || return 1
+  case "$host" in
+    127.0.0.1 | localhost | '[::1]') ;;
+    *)
+      log_error "Mihomo Controller 只允许监听回环地址，当前地址: $host"
+      return 1
+      ;;
+  esac
   printf '%s:%s\n' "$host" "$port"
 }
 
@@ -259,13 +273,16 @@ inject_proxy_settings() {
     ."mixed-port" = (strenv(CODEX_PROXY_PORT) | tonumber) |
     .mode = "rule" |
     ."external-controller" = strenv(CODEX_MIHOMO_CONTROLLER_BIND) |
+    del(.secret) |
     ."external-ui" = "dashboard" |
+    .profile = (.profile // {}) |
+    .profile."store-selected" = true |
     .rules = (.rules // []) |
     ."proxy-groups" = (
       [{
         "name": strenv(CODEX_PROXY_GROUP_NAME),
         "type": "select",
-        "proxies": ((["DIRECT"] + ((.proxies // []) | map(.name))) | unique)
+        "proxies": (((.proxies // []) | map(.name) | map(select(. != "DIRECT"))) + ["DIRECT"])
       }] +
       ((."proxy-groups" // []) | map(select(.name != strenv(CODEX_PROXY_GROUP_NAME))))
     )
@@ -276,7 +293,7 @@ inject_proxy_settings() {
 
 start_mihomo() {
   local mihomo_bin="$1"
-  local mihomo_pid
+  local mihomo_pid wait_seconds
 
   mkdir -p "$LOG_DIR"
   stop_existing_mihomo
@@ -285,21 +302,26 @@ start_mihomo() {
   mihomo_pid="$!"
   echo "$mihomo_pid" > "$CLASH_RUNTIME_DIR/mihomo.pid"
 
-  for _ in $(seq 1 20); do
+  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
+  for _ in $(seq 1 "$wait_seconds"); do
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_error "Mihomo 在打开代理端口前已退出"
       tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true
       return 1
     fi
 
-    if local_proxy_is_listening "$CODEX_PROXY_URL"; then
-      log_ok "Mihomo 正在监听 $CODEX_PROXY_URL"
+    if mihomo_is_ready; then
+      log_ok "Mihomo 代理端口、Controller 和 $CODEX_PROXY_GROUP 均已就绪"
       return 0
     fi
     sleep 1
   done
 
-  log_error "Mihomo 未能监听 $CODEX_PROXY_URL"
+  if local_proxy_is_listening "$CODEX_PROXY_URL"; then
+    log_error "Mihomo 代理端口已启动，但 $(mihomo_controller_status_text)"
+  else
+    log_error "Mihomo 未能监听 $CODEX_PROXY_URL"
+  fi
   tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true
   return 1
 }

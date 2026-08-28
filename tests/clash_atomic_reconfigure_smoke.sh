@@ -24,7 +24,7 @@ set -euo pipefail
 if [ "${1:-}" = eval ] && [ "${2:-}" = -i ]; then
   file="${@: -1}"
   if grep -q 'FAIL_START' "$file"; then
-    printf 'mixed-port: %s\nfail-start: true\n' "$CODEX_PROXY_PORT" > "$file"
+    printf 'mixed-port: %s\ncontroller-broken: true\n' "$CODEX_PROXY_PORT" > "$file"
   else
     printf 'mixed-port: %s\nold-config: true\n' "$CODEX_PROXY_PORT" > "$file"
   fi
@@ -41,9 +41,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in -d) config_dir="$2"; shift 2 ;; *) shift ;; esac
 done
 [ -n "$config_dir" ]
-if grep -q '^fail-start: true$' "$config_dir/config.yaml"; then
-  exit 23
-fi
 touch "$config_dir/listening"
 trap 'rm -f "$config_dir/listening"; exit 0' TERM INT EXIT
 while :; do sleep 1; done
@@ -66,9 +63,28 @@ cat > "$fake_bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 output=""
+write_status="false"
+url=""
 while [ "$#" -gt 0 ]; do
-  case "$1" in -o) output="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    -w) write_status="true"; shift 2 ;;
+    http://* | https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
 done
+case "$url" in
+  */proxies/CodexProxy)
+    if grep -q '^controller-broken: true$' "${FAKE_CLASH_CONF:?}/config.yaml"; then
+      printf '%s\n' '{"error":"group unavailable"}' > "$output"
+      [ "$write_status" != "true" ] || printf '404'
+      exit 0
+    fi
+    printf '%s\n' '{"name":"CodexProxy","now":"Node A","all":["Node A","DIRECT"]}' > "$output"
+    [ "$write_status" != "true" ] || printf '200'
+    exit 0
+    ;;
+esac
 printf '%s\n' 'proxies:' '  - name: FAIL_START' > "$output"
 SH
 cat > "$fake_bin/ss" <<'SH'

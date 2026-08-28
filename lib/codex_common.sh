@@ -292,9 +292,13 @@ mihomo_process_text_matches() {
   '
 }
 
+mihomo_runtime_dir() {
+  printf '%s\n' "${CLASH_CODEX_AUTODL_CLASH_RUNTIME_DIR:-$CODEX_AUTODL_REPO_ROOT/clash}"
+}
+
 mihomo_pid_is_running() {
-  local pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
-  local pid process_text
+  local pid_file pid process_text
+  pid_file="$(mihomo_runtime_dir)/mihomo.pid"
 
   if [ ! -f "$pid_file" ]; then
     return 1
@@ -325,6 +329,177 @@ local_proxy_is_ready() {
   local_proxy_is_listening "$proxy_url" && {
     mihomo_pid_is_running || proxy_systemd_is_active
   }
+}
+
+MIHOMO_CONTROLLER_STATUS="not-checked"
+MIHOMO_CONTROLLER_HTTP_STATUS=""
+MIHOMO_CONTROLLER_PAYLOAD=""
+MIHOMO_CONTROLLER_CURRENT_NODE=""
+
+mihomo_controller_request() {
+  local method="${1:-GET}" endpoint="${2:-}" request_payload="${3:-}"
+  local body_file error_file http_status curl_status url
+  local -a curl_args
+
+  MIHOMO_CONTROLLER_STATUS="not-checked"
+  MIHOMO_CONTROLLER_HTTP_STATUS=""
+  MIHOMO_CONTROLLER_PAYLOAD=""
+  MIHOMO_CONTROLLER_CURRENT_NODE=""
+  command -v curl >/dev/null 2>&1 || {
+    MIHOMO_CONTROLLER_STATUS="controller-unreachable"
+    return 1
+  }
+
+  url="${CODEX_MIHOMO_CONTROLLER_URL%/}${endpoint}"
+  body_file="$(mktemp)"
+  error_file="$(mktemp)"
+  curl_args=(--noproxy '*' -sS --max-time "${CODEX_MIHOMO_CONTROLLER_TIMEOUT:-3}" -o "$body_file" -w '%{http_code}')
+  if [ "$method" != GET ]; then
+    curl_args+=(-X "$method")
+  fi
+  if [ -n "$request_payload" ]; then
+    curl_args+=(-H 'Content-Type: application/json' --data "$request_payload")
+  fi
+
+  if http_status="$(curl "${curl_args[@]}" "$url" 2>"$error_file")"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+  MIHOMO_CONTROLLER_PAYLOAD="$(cat "$body_file" 2>/dev/null || true)"
+  MIHOMO_CONTROLLER_HTTP_STATUS="$http_status"
+  rm -f "$body_file" "$error_file"
+
+  if [ "$curl_status" -ne 0 ]; then
+    if [ "$curl_status" -eq 28 ]; then
+      MIHOMO_CONTROLLER_STATUS="timeout"
+    else
+      MIHOMO_CONTROLLER_STATUS="controller-unreachable"
+    fi
+    return 1
+  fi
+
+  case "$http_status" in
+    2??) MIHOMO_CONTROLLER_STATUS="success"; return 0 ;;
+    401 | 403) MIHOMO_CONTROLLER_STATUS="unauthorized" ;;
+    404) MIHOMO_CONTROLLER_STATUS="group-not-found" ;;
+    000 | '') MIHOMO_CONTROLLER_STATUS="controller-unreachable" ;;
+    *) MIHOMO_CONTROLLER_STATUS="http-error" ;;
+  esac
+  return 1
+}
+
+mihomo_yq_binary() {
+  local candidate
+  candidate="$(mihomo_runtime_dir)/bin/yq"
+  [ -x "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
+mihomo_proxy_group_current_from_payload() {
+  local payload="$1" python_bin yq_bin name node count
+  if python_bin="$(python_command 2>/dev/null)"; then
+    CODEX_PROXY_GROUP="$CODEX_PROXY_GROUP" "$python_bin" -c '
+import json, os, sys
+try:
+    payload = json.load(sys.stdin)
+    choices = payload.get("all")
+    node = payload.get("now")
+    if payload.get("name") != os.environ["CODEX_PROXY_GROUP"]:
+        raise ValueError("wrong group")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("missing choices")
+    if not isinstance(node, str) or not node or node not in choices:
+        raise ValueError("invalid current node")
+    print(node)
+except Exception:
+    raise SystemExit(1)
+' <<< "$payload"
+    return
+  fi
+
+  yq_bin="$(mihomo_yq_binary)" || return 1
+  name="$(printf '%s' "$payload" | "$yq_bin" eval -r '.name // ""' - 2>/dev/null || true)"
+  node="$(printf '%s' "$payload" | "$yq_bin" eval -r '.now // ""' - 2>/dev/null || true)"
+  count="$(printf '%s' "$payload" | "$yq_bin" eval -r '.all | length' - 2>/dev/null || true)"
+  [ "$name" = "$CODEX_PROXY_GROUP" ] || return 1
+  case "$count" in '' | *[!0-9]* | 0) return 1 ;; esac
+  [ -n "$node" ] || return 1
+  printf '%s' "$payload" | "$yq_bin" eval -r '.all[]' - 2>/dev/null | grep -Fxq "$node" || return 1
+  printf '%s\n' "$node"
+}
+
+mihomo_proxy_group_choices_from_payload() {
+  local payload="$1" python_bin yq_bin
+  if python_bin="$(python_command 2>/dev/null)"; then
+    "$python_bin" -c '
+import json, sys
+try:
+    choices = json.load(sys.stdin).get("all")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("missing choices")
+    for name in choices:
+        if isinstance(name, str) and name:
+            print(name)
+except Exception:
+    raise SystemExit(1)
+' <<< "$payload"
+    return
+  fi
+  yq_bin="$(mihomo_yq_binary)" || return 1
+  printf '%s' "$payload" | "$yq_bin" eval -r '.all[]' - 2>/dev/null
+}
+
+mihomo_controller_get_proxy_group() {
+  local node
+  if ! mihomo_controller_request GET "/proxies/$CODEX_PROXY_GROUP"; then
+    return 1
+  fi
+  node="$(mihomo_proxy_group_current_from_payload "$MIHOMO_CONTROLLER_PAYLOAD")" || {
+    MIHOMO_CONTROLLER_STATUS="invalid-response"
+    return 1
+  }
+  MIHOMO_CONTROLLER_CURRENT_NODE="$node"
+}
+
+mihomo_controller_is_ready() {
+  mihomo_controller_get_proxy_group >/dev/null
+}
+
+mihomo_is_ready() {
+  local_proxy_is_ready "$CODEX_PROXY_URL" && mihomo_controller_is_ready
+}
+
+mihomo_controller_status_text() {
+  case "${MIHOMO_CONTROLLER_STATUS:-not-checked}" in
+    success) printf 'Controller 已就绪' ;;
+    timeout) printf 'Controller 响应超时' ;;
+    unauthorized) printf 'Controller 认证失败' ;;
+    group-not-found) printf '找不到代理组: %s' "$CODEX_PROXY_GROUP" ;;
+    invalid-response) printf 'Controller 响应无效' ;;
+    http-error) printf 'Controller HTTP 错误: %s' "${MIHOMO_CONTROLLER_HTTP_STATUS:-未提供状态码}" ;;
+    *) printf 'Controller 不可访问' ;;
+  esac
+}
+
+mihomo_readiness_error_text() {
+  if ! mihomo_pid_is_running && ! proxy_systemd_is_active; then
+    printf 'Mihomo 未运行'
+  elif ! local_proxy_is_listening "$CODEX_PROXY_URL"; then
+    printf 'Mihomo 代理端口未就绪: %s' "$CODEX_PROXY_URL"
+  else
+    mihomo_controller_status_text
+  fi
+}
+
+wait_for_mihomo_ready() {
+  local wait_seconds="${1:-${CODEX_MIHOMO_START_WAIT_SECONDS:-20}}"
+  local attempt
+  for attempt in $(seq 1 "$wait_seconds"); do
+    mihomo_is_ready && return 0
+    [ "$attempt" -eq "$wait_seconds" ] || sleep 1
+  done
+  return 1
 }
 
 clear_dead_local_proxy_env() {
@@ -363,13 +538,14 @@ mihomo_arch_name() {
 }
 
 mihomo_binary_path() {
-  local arch candidate
+  local arch candidate runtime_dir
   arch="$(mihomo_arch_name)" || return 1
+  runtime_dir="$(mihomo_runtime_dir)"
 
   for candidate in \
-    "$CODEX_AUTODL_REPO_ROOT/clash/bin/mihomo-linux-$arch" \
-    "$CODEX_AUTODL_REPO_ROOT/clash/bin/mihomo" \
-    "$CODEX_AUTODL_REPO_ROOT/clash/bin/clash"; do
+    "$runtime_dir/bin/mihomo-linux-$arch" \
+    "$runtime_dir/bin/mihomo" \
+    "$runtime_dir/bin/clash"; do
     if [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -380,17 +556,26 @@ mihomo_binary_path() {
 }
 
 start_existing_mihomo() {
-  local config_dir config_file log_dir log_file pid_file mihomo_bin mihomo_pid wait_seconds
+  local runtime_dir config_dir config_file log_dir log_file pid_file mihomo_bin mihomo_pid wait_seconds
 
-  if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+  if mihomo_is_ready; then
     return 0
   fi
 
-  config_dir="$CODEX_AUTODL_REPO_ROOT/clash/conf"
+  if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    if wait_for_mihomo_ready; then
+      return 0
+    fi
+    log_warn "Mihomo 代理端口已启动，但 $(mihomo_controller_status_text)"
+    return 1
+  fi
+
+  runtime_dir="$(mihomo_runtime_dir)"
+  config_dir="$runtime_dir/conf"
   config_file="$config_dir/config.yaml"
-  log_dir="$CODEX_AUTODL_REPO_ROOT/clash/logs"
+  log_dir="$runtime_dir/logs"
   log_file="$log_dir/mihomo.log"
-  pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
+  pid_file="$runtime_dir/mihomo.pid"
 
   if [ ! -f "$config_file" ]; then
     log_warn "Mihomo 配置不存在: $config_file"
@@ -422,7 +607,7 @@ start_existing_mihomo() {
   mihomo_pid="$!"
   echo "$mihomo_pid" > "$pid_file"
 
-  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-10}"
+  wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
   for _ in $(seq 1 "$wait_seconds"); do
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_warn "Mihomo 在打开代理端口前已退出"
@@ -430,14 +615,18 @@ start_existing_mihomo() {
       return 1
     fi
 
-    if local_proxy_is_listening "$CODEX_PROXY_URL"; then
-      log_ok "Mihomo 正在监听 $CODEX_PROXY_URL"
+    if mihomo_is_ready; then
+      log_ok "Mihomo 代理端口和 Controller 均已就绪"
       return 0
     fi
     sleep 1
   done
 
-  log_warn "Mihomo 未能监听 $CODEX_PROXY_URL"
+  if local_proxy_is_listening "$CODEX_PROXY_URL"; then
+    log_warn "Mihomo 代理端口已启动，但 $(mihomo_controller_status_text)"
+  else
+    log_warn "Mihomo 未能监听 $CODEX_PROXY_URL"
+  fi
   tail -n 40 "$log_file" >&2 || true
   return 1
 }
@@ -461,7 +650,7 @@ set_proxy_env() {
 enable_proxy_env() {
   if ! start_existing_mihomo; then
     clear_proxy_env
-    log_warn "代理未开启: Mihomo 未监听 $CODEX_PROXY_URL"
+    log_warn "代理未开启: $(mihomo_readiness_error_text)"
     return 1
   fi
 
@@ -491,17 +680,12 @@ proxy_systemd_is_active() {
 }
 
 wait_for_local_proxy() {
-  local wait_seconds="${CODEX_MIHOMO_START_WAIT_SECONDS:-10}"
-  for _ in $(seq 1 "$wait_seconds"); do
-    local_proxy_is_ready "$CODEX_PROXY_URL" && return 0
-    sleep 1
-  done
-  return 1
+  wait_for_mihomo_ready "${CODEX_MIHOMO_START_WAIT_SECONDS:-20}"
 }
 
 stop_existing_mihomo() {
   local pid_file pid
-  pid_file="$CODEX_AUTODL_REPO_ROOT/clash/mihomo.pid"
+  pid_file="$(mihomo_runtime_dir)/mihomo.pid"
   if [ -f "$pid_file" ]; then
     pid="$(cat "$pid_file" 2>/dev/null || true)"
     case "$pid" in
@@ -547,7 +731,7 @@ proxy_enable_persistent() {
     log_ok "代理已永久开启: $CODEX_PROXY_URL"
     return 0
   fi
-  log_error "代理开启失败: Mihomo 未监听 $CODEX_PROXY_URL"
+  log_error "代理开启失败: $(mihomo_readiness_error_text)"
   return 1
 }
 
@@ -584,13 +768,31 @@ proxy_shell_start() {
     return 0
   fi
   if ! local_proxy_is_ready "$CODEX_PROXY_URL"; then
-    enable_proxy_service >/dev/null 2>&1 || true
+    if ! enable_proxy_service >/dev/null 2>&1; then
+      if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+        proxy_print_env
+        printf '[proxy] 已开启 | %s\n' "$(mihomo_controller_status_text)" >&2
+      else
+        proxy_print_unset_env
+        printf '[proxy] 启动失败: %s\n' "$(mihomo_readiness_error_text)" >&2
+      fi
+      return 1
+    fi
   fi
-  if local_proxy_is_ready "$CODEX_PROXY_URL" || wait_for_local_proxy; then
+  if mihomo_is_ready || wait_for_local_proxy; then
     proxy_print_env
-    node="$(current_proxy_node)"
+    node="$MIHOMO_CONTROLLER_CURRENT_NODE"
+    if [ -z "$node" ]; then
+      mihomo_controller_get_proxy_group || true
+      node="$MIHOMO_CONTROLLER_CURRENT_NODE"
+    fi
     printf '[proxy] 已开启 | 节点: %s\n' "$node" >&2
     return 0
+  fi
+  if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+    proxy_print_env
+    printf '[proxy] 已开启 | %s\n' "$(mihomo_controller_status_text)" >&2
+    return 1
   fi
   proxy_print_unset_env
   printf '[proxy] 启动失败: %s\n' "$CODEX_PROXY_URL" >&2
@@ -598,50 +800,16 @@ proxy_shell_start() {
 }
 
 current_proxy_node() {
-  local tmp_py python_bin yq_bin payload node
-  if ! python_bin="$(python_command)"; then
-    yq_bin="$CODEX_AUTODL_REPO_ROOT/clash/bin/yq"
-    if [ -x "$yq_bin" ] && command -v curl >/dev/null 2>&1; then
-      payload="$(curl --noproxy '*' -fsS --max-time 3 \
-        "${CODEX_MIHOMO_CONTROLLER_URL%/}/proxies/$CODEX_PROXY_GROUP" 2>/dev/null || true)"
-      if [ -z "$payload" ]; then
-        printf 'unknown\n'
-        return 0
-      fi
-      node="$(printf '%s' "$payload" | "$yq_bin" eval -r '.now // "DIRECT"' - 2>/dev/null || true)"
-      printf '%s\n' "${node:-unknown}"
-      return 0
-    fi
-    printf 'unknown\n'
+  if mihomo_controller_get_proxy_group; then
+    printf '%s\n' "$MIHOMO_CONTROLLER_CURRENT_NODE"
     return 0
   fi
-
-  tmp_py="$(mktemp)"
-  cat > "$tmp_py" <<'PY'
-import json
-import os
-import urllib.error
-import urllib.request
-
-base = os.environ.get("CODEX_MIHOMO_CONTROLLER_URL", "http://127.0.0.1:6006").rstrip("/")
-group = os.environ.get("CODEX_PROXY_GROUP", "CodexProxy")
-
-try:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(f"{base}/proxies/{group}", timeout=3) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    print(payload.get("now") or "DIRECT")
-except Exception:
-    print("unknown")
-PY
-  CODEX_MIHOMO_CONTROLLER_URL="$CODEX_MIHOMO_CONTROLLER_URL" \
-    CODEX_PROXY_GROUP="$CODEX_PROXY_GROUP" \
-    "$python_bin" "$tmp_py"
-  rm -f "$tmp_py"
+  log_error "无法读取当前节点: $(mihomo_controller_status_text)"
+  return 1
 }
 
 function proxy-status {
-  local node running="false"
+  local node running="false" port_ready="false"
   load_project_config
 
   if [ "$PROXY_ENABLED" = "true" ]; then
@@ -661,15 +829,21 @@ function proxy-status {
   else
     log_warn "Mihomo: 未运行"
   fi
-  if [ "$running" = "true" ]; then
-    node="$(current_proxy_node)"
+  if local_proxy_is_listening "$CODEX_PROXY_URL"; then
+    port_ready="true"
+    log_ok "代理端口: 已就绪"
   else
-    node="unknown"
+    log_warn "代理端口: 未就绪"
   fi
-  if [ "$node" = "unknown" ]; then
-    log_warn "当前节点: unknown"
-  else
+  log_info "Controller: $CODEX_MIHOMO_CONTROLLER_URL"
+  log_info "代理组: $CODEX_PROXY_GROUP"
+  if [ "$running" = "true" ] && [ "$port_ready" = "true" ] && mihomo_controller_get_proxy_group; then
+    log_ok "Controller 状态: 已就绪"
+    node="$MIHOMO_CONTROLLER_CURRENT_NODE"
     log_ok "当前节点: $node"
+  else
+    [ "$running" = "true" ] && [ "$port_ready" = "true" ] || MIHOMO_CONTROLLER_STATUS="controller-unreachable"
+    log_warn "Controller 状态: $(mihomo_controller_status_text)"
   fi
 }
 
@@ -870,14 +1044,15 @@ remove_legacy_shell_hook_blocks() {
 }
 
 install_proxy_systemd_service() {
-  local user_dir unit_file mihomo_bin config_dir log_dir
+  local user_dir unit_file mihomo_bin runtime_dir config_dir log_dir
   user_systemd_available || {
     log_info "当前环境不支持 systemd --user，将在首个交互终端中启动 Mihomo"
     return 0
   }
   mihomo_bin="$(mihomo_binary_path)" || return 1
-  config_dir="$CODEX_AUTODL_REPO_ROOT/clash/conf"
-  log_dir="$CODEX_AUTODL_REPO_ROOT/clash/logs"
+  runtime_dir="$(mihomo_runtime_dir)"
+  config_dir="$runtime_dir/conf"
+  log_dir="$runtime_dir/logs"
   user_dir="$HOME/.config/systemd/user"
   unit_file="$user_dir/$(proxy_service_name)"
   mkdir -p "$user_dir" "$log_dir"
@@ -1003,122 +1178,54 @@ Codex 命令:
 TEXT
 }
 
-function proxy-switch {
-  load_project_config
-  local tmp_py python_bin
-
-  python_bin="$(python_command)" || {
-    proxy_switch_with_yq
+mihomo_proxy_selection_payload() {
+  local target="$1" python_bin yq_bin
+  if python_bin="$(python_command 2>/dev/null)"; then
+    CODEX_PROXY_TARGET="$target" "$python_bin" -c \
+      'import json, os; print(json.dumps({"name": os.environ["CODEX_PROXY_TARGET"]}, ensure_ascii=False))'
     return
-  }
-
-  tmp_py="$(mktemp)"
-  cat > "$tmp_py" <<'PY'
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
-
-base = os.environ.get("CODEX_MIHOMO_CONTROLLER_URL", "http://127.0.0.1:6006").rstrip("/")
-group = os.environ.get("CODEX_PROXY_GROUP", "CodexProxy")
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-
-def fetch_state():
-    with opener.open(f"{base}/proxies/{group}", timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def set_proxy(name):
-    payload = json.dumps({"name": name}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/proxies/{group}",
-        data=payload,
-        method="PUT",
-        headers={"Content-Type": "application/json"},
-    )
-    with opener.open(req, timeout=10) as resp:
-        resp.read()
-
-
-def render_state(state):
-    current = state.get("now") or "DIRECT"
-    all_names = state.get("all") or []
-    choices = []
-    for name in all_names:
-        if name not in choices:
-            choices.append(name)
-    print(f"当前选择: {current}")
-    print(f"选择组: {group}")
-    print("可用节点:")
-    for idx, name in enumerate(choices, 1):
-        marker = " [当前]" if name == current else ""
-        print(f"  {idx}. {name}{marker}")
-    return choices
-
-
-try:
-    choices = render_state(fetch_state())
-except urllib.error.URLError as exc:
-    print(f"无法连接 Mihomo 控制器 {base}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-while True:
-    try:
-        answer = input("请输入节点编号（r=刷新，q=退出）: ").strip().lower()
-    except EOFError:
-        print(file=sys.stderr)
-        raise SystemExit(1)
-
-    if answer in {"q", "quit", "exit"}:
-        raise SystemExit(0)
-    if answer in {"r", "refresh"}:
-        choices = render_state(fetch_state())
-        continue
-    if answer.isdigit():
-        index = int(answer)
-        if 1 <= index <= len(choices):
-            target = choices[index - 1]
-            try:
-                set_proxy(target)
-            except urllib.error.URLError as exc:
-                print(f"切换 {group} 失败: {exc}", file=sys.stderr)
-                raise SystemExit(1)
-            print(f"已选择: {target}")
-            raise SystemExit(0)
-    print("无效选择")
-PY
-  if CODEX_MIHOMO_CONTROLLER_URL="$CODEX_MIHOMO_CONTROLLER_URL" \
-    CODEX_PROXY_GROUP="$CODEX_PROXY_GROUP" \
-    "$python_bin" "$tmp_py"; then
-    rm -f "$tmp_py"
-    return 0
-  else
-    rm -f "$tmp_py"
-    return 1
   fi
+  yq_bin="$(mihomo_yq_binary)" || return 1
+  CODEX_PROXY_TARGET="$target" "$yq_bin" -n -o=json '{"name": strenv(CODEX_PROXY_TARGET)}'
 }
 
-proxy_switch_with_yq() {
-  local yq_bin base state current answer target payload index
+function proxy-switch {
+  local current answer target payload index
   local -a choices
-  yq_bin="$CODEX_AUTODL_REPO_ROOT/clash/bin/yq"
-  [ -x "$yq_bin" ] || { log_error "缺少可用的 Python 或 yq"; return 1; }
-  command -v curl >/dev/null 2>&1 || { log_error "缺少 curl"; return 1; }
-  base="${CODEX_MIHOMO_CONTROLLER_URL%/}/proxies/$CODEX_PROXY_GROUP"
+  load_project_config
+
+  if ! mihomo_is_ready; then
+    if local_proxy_is_ready "$CODEX_PROXY_URL"; then
+      wait_for_mihomo_ready || {
+        log_error "无法切换节点: $(mihomo_controller_status_text)"
+        return 1
+      }
+    else
+      enable_proxy_service >/dev/null 2>&1 || {
+        log_error "无法切换节点: $(mihomo_readiness_error_text)"
+        return 1
+      }
+      mihomo_is_ready || wait_for_mihomo_ready || {
+        log_error "无法切换节点: $(mihomo_readiness_error_text)"
+        return 1
+      }
+    fi
+  fi
 
   while :; do
-    state="$(curl --noproxy '*' -fsS --max-time 10 "$base")" || {
-      log_error "无法连接 Mihomo 控制器: $CODEX_MIHOMO_CONTROLLER_URL"
-      return 1
-    }
-    current="$(printf '%s' "$state" | "$yq_bin" eval -r '.now // "DIRECT"' -)"
-    mapfile -t choices < <(printf '%s' "$state" | "$yq_bin" eval -r '.all[]' - | awk '!seen[$0]++')
-    if [ "${#choices[@]}" -eq 0 ]; then
-      log_error "代理选择组中没有可用节点"
+    if ! mihomo_controller_get_proxy_group; then
+      log_error "无法切换节点: $(mihomo_controller_status_text)"
       return 1
     fi
+    current="$MIHOMO_CONTROLLER_CURRENT_NODE"
+    mapfile -t choices < <(
+      mihomo_proxy_group_choices_from_payload "$MIHOMO_CONTROLLER_PAYLOAD" | awk '!seen[$0]++'
+    )
+    if [ "${#choices[@]}" -eq 0 ]; then
+      log_error "无法切换节点: Controller 响应无效"
+      return 1
+    fi
+
     printf '当前选择: %s\n选择组: %s\n可用节点:\n' "$current" "$CODEX_PROXY_GROUP"
     for index in "${!choices[@]}"; do
       if [ "${choices[$index]}" = "$current" ]; then
@@ -1139,9 +1246,14 @@ proxy_switch_with_yq() {
       continue
     fi
     target="${choices[$((answer - 1))]}"
-    payload="$(CODEX_PROXY_TARGET="$target" "$yq_bin" -n -o=json '{"name": strenv(CODEX_PROXY_TARGET)}')"
-    curl --noproxy '*' -fsS --max-time 10 -X PUT \
-      -H 'Content-Type: application/json' --data "$payload" "$base" >/dev/null
+    payload="$(mihomo_proxy_selection_payload "$target")" || {
+      log_error "无法生成节点切换请求"
+      return 1
+    }
+    if ! mihomo_controller_request PUT "/proxies/$CODEX_PROXY_GROUP" "$payload"; then
+      log_error "切换 $CODEX_PROXY_GROUP 失败: $(mihomo_controller_status_text)"
+      return 1
+    fi
     printf '已选择: %s\n' "$target"
     return 0
   done

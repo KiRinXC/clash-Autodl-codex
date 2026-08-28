@@ -114,4 +114,9 @@ output="$(
 grep -q "\[OK\].*永久代理: 已开启" <<<"$output"
 grep -q "\[OK\].*当前终端环境: 已开启" <<<"$output"
 grep -q "\[INFO\].*地址: http://127.0.0.1:7890" <<<"$output"
+grep -q "\[OK\].*代理端口: 已就绪" <<<"$output"
+grep -q "\[INFO\].*Controller: $controller_base" <<<"$output"
+grep -q "\[INFO\].*代理组: CodexProxy" <<<"$output"
+grep -q "\[OK\].*Controller 状态: 已就绪" <<<"$output"
 grep -q "\[OK\].*当前节点: Node A" <<<"$output"
+if grep -q 'unknown' <<<"$output"; then exit 1; fi

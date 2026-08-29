@@ -35,6 +35,12 @@ exec -a mihomo sleep 1000
 SH
 chmod +x "$runtime/clash/bin/yq" "$runtime/clash/bin/mihomo-linux-amd64"
 dd if=/dev/zero of="$runtime/clash/conf/geoip.metadb" bs=1048576 count=6 >/dev/null 2>&1
+mkdir -p "$runtime/clash/logs"
+bash -c 'exec -a mihomo sleep 1000' &
+stale_pid="$!"
+printf '%s\n' "$stale_pid" > "$runtime/clash/mihomo.pid"
+printf '%s\n' 'level=error msg="listen tcp 127.0.0.1:7890: bind: address already in use"' \
+  > "$runtime/clash/logs/mihomo.log"
 
 cat > "$fake_bin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -104,6 +110,11 @@ grep -q "CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:16006'" "$tmp_config/conf
 grep -q "PROXY_ENABLED='true'" "$tmp_config/config.sh"
 grep -q '默认代理端口已被其他进程占用' <<< "$install_output"
 grep -q '默认 Controller 端口已被其他进程占用' <<< "$install_output"
+grep -q '上次失败后残留的未就绪 Mihomo 进程' <<< "$install_output"
+if kill -0 "$stale_pid" >/dev/null 2>&1; then
+  printf 'stale failed Mihomo process was not cleaned up\n' >&2
+  exit 1
+fi
 grep -qx 'mixed-port: 17890' "$runtime/clash/conf/config.yaml"
 grep -qx 'external-controller: 127.0.0.1:16006' "$runtime/clash/conf/config.yaml"
 grep -q 'proxy-switch()' "$tmp_config/proxy-shell-init.sh"

@@ -318,10 +318,19 @@ first_available_loopback_url() {
 }
 
 resolve_default_mihomo_listener_conflicts() {
-  local replacement
+  local replacement runtime_log
 
-  if mihomo_pid_is_running || proxy_systemd_is_active; then
+  if proxy_systemd_is_active; then
     return 0
+  fi
+
+  if mihomo_pid_is_running; then
+    runtime_log="$(mihomo_runtime_dir)/logs/mihomo.log"
+    if ! mihomo_log_has_bind_conflict "$runtime_log" && local_proxy_is_ready "$CODEX_PROXY_URL"; then
+      return 0
+    fi
+    log_warn "检测到本项目上次失败后残留的未就绪 Mihomo 进程，正在安全停止后重新选择端口"
+    stop_existing_mihomo
   fi
 
   if [ "$CODEX_PROXY_URL" = "$DEFAULT_PROXY_URL" ] && local_proxy_is_listening "$CODEX_PROXY_URL"; then

@@ -85,6 +85,12 @@ common_env=(
   CLASH_CODEX_AUTODL_CONFIG_DIR="$config"
 )
 
+next_url="$(env "${common_env[@]}" SS_MODE=anonymous bash -c "
+  . '$runtime/lib/codex_common.sh'
+  first_available_loopback_url 17890
+")"
+[ "$next_url" = 'http://127.0.0.1:17891' ]
+
 # A listener owned by a visible different PID is not accepted as Mihomo ready.
 env "${common_env[@]}" SS_MODE=other bash -c "
   . '$runtime/lib/codex_common.sh'

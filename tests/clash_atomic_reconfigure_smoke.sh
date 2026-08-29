@@ -9,6 +9,7 @@ data="$tmp_dir/data"
 bin="$home/.local/bin"
 runtime="$data/runtime"
 fake_bin="$tmp_dir/fake-bin"
+pid_log="$tmp_dir/mihomo-pids"
 
 cleanup() {
   pid="$(cat "$runtime/clash/mihomo.pid" 2>/dev/null || true)"
@@ -41,6 +42,12 @@ while [ "$#" -gt 0 ]; do
   case "$1" in -d) config_dir="$2"; shift 2 ;; *) shift ;; esac
 done
 [ -n "$config_dir" ]
+printf '%s\n' "$$" >> "${FAKE_MIHOMO_PID_LOG:?}"
+if grep -q '^controller-broken: true$' "$config_dir/config.yaml"; then
+  printf '%s\n' 'level=error msg="Start Mixed(http+socks) server error: listen tcp 127.0.0.1:17890: bind: address already in use"' >&2
+  trap 'exit 0' TERM INT EXIT
+  while :; do sleep 1; done
+fi
 touch "$config_dir/listening"
 trap 'rm -f "$config_dir/listening"; exit 0' TERM INT EXIT
 while :; do sleep 1; done
@@ -50,7 +57,8 @@ dd if=/dev/zero of="$runtime/clash/conf/geoip.metadb" bs=1048576 count=6 >/dev/n
 printf '%s\n' 'mixed-port: 17890' 'old-config: true' > "$runtime/clash/conf/config.yaml"
 chmod 600 "$runtime/clash/conf/config.yaml"
 
-nohup "$runtime/clash/bin/mihomo-linux-amd64" -d "$runtime/clash/conf" >/dev/null 2>&1 &
+FAKE_MIHOMO_PID_LOG="$pid_log" nohup "$runtime/clash/bin/mihomo-linux-amd64" \
+  -d "$runtime/clash/conf" >/dev/null 2>&1 &
 old_pid="$!"
 printf '%s\n' "$old_pid" > "$runtime/clash/mihomo.pid"
 for _ in 1 2 3 4 5; do
@@ -116,6 +124,7 @@ if printf '%s\n' 'https://broken-subscription.example.invalid/clash.yaml' | \
   CLASH_CODEX_AUTODL_CONFIG_DIR="$config" \
   CLASH_CODEX_AUTODL_DATA_DIR="$data" \
   CLASH_CODEX_AUTODL_USER_BIN_DIR="$bin" \
+  FAKE_MIHOMO_PID_LOG="$pid_log" \
   CODEX_MIHOMO_START_WAIT_SECONDS=2 \
   bash "$repo_root/install-clash.sh" >/dev/null 2>&1; then
   printf '损坏的新配置不应安装成功\n' >&2
@@ -128,6 +137,12 @@ grep -q 'working-subscription.example.invalid' "$config/config.sh"
 grep -q '^old-config: true$' "$runtime/clash/conf/config.yaml"
 new_pid="$(cat "$runtime/clash/mihomo.pid")"
 kill -0 "$new_pid"
+mapfile -t started_pids < "$pid_log"
+[ "${#started_pids[@]}" -ge 3 ]
+if kill -0 "${started_pids[1]}" >/dev/null 2>&1; then
+  printf 'failed staged Mihomo process was not cleaned up\n' >&2
+  exit 1
+fi
 [ -f "$runtime/clash/conf/listening" ]
 [ "$(stat -c '%a' "$runtime/clash/conf/config.yaml")" = 600 ]
 ! find "$runtime/clash/conf" -maxdepth 1 \( -name '.config.pending.*' -o -name '.config.backup.*' \) | grep -q .

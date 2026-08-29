@@ -304,6 +304,47 @@ PY
   (exec 3<>"/dev/tcp/$host/$port") >/dev/null 2>&1
 }
 
+first_available_loopback_url() {
+  local first_port="$1" candidate_port candidate_url
+
+  for ((candidate_port = first_port; candidate_port < first_port + 20; candidate_port++)); do
+    candidate_url="http://127.0.0.1:$candidate_port"
+    if ! local_proxy_is_listening "$candidate_url"; then
+      printf '%s\n' "$candidate_url"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_default_mihomo_listener_conflicts() {
+  local replacement
+
+  if mihomo_pid_is_running || proxy_systemd_is_active; then
+    return 0
+  fi
+
+  if [ "$CODEX_PROXY_URL" = "$DEFAULT_PROXY_URL" ] && local_proxy_is_listening "$CODEX_PROXY_URL"; then
+    clear_dead_local_proxy_env
+    replacement="$(first_available_loopback_url 17890)" || {
+      log_error "默认代理端口已被其他进程占用，且未找到可用备用端口: $CODEX_PROXY_URL"
+      return 1
+    }
+    log_warn "默认代理端口已被其他进程占用: $CODEX_PROXY_URL；本项目将改用 $replacement"
+    CODEX_PROXY_URL="$replacement"
+  fi
+
+  if [ "$CODEX_MIHOMO_CONTROLLER_URL" = "$DEFAULT_MIHOMO_CONTROLLER_URL" ] &&
+    local_proxy_is_listening "$CODEX_MIHOMO_CONTROLLER_URL"; then
+    replacement="$(first_available_loopback_url 16006)" || {
+      log_error "默认 Controller 端口已被其他进程占用，且未找到可用备用端口: $CODEX_MIHOMO_CONTROLLER_URL"
+      return 1
+    }
+    log_warn "默认 Controller 端口已被其他进程占用: $CODEX_MIHOMO_CONTROLLER_URL；本项目将改用 $replacement"
+    CODEX_MIHOMO_CONTROLLER_URL="$replacement"
+  fi
+}
+
 proxy_url_parse_endpoint() {
   local proxy_url="$1" authority host port port_number
 
@@ -367,6 +408,11 @@ proxy_egress_is_working() {
   command -v curl >/dev/null 2>&1 || return 1
   curl -fsS --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" \
     -x "$proxy_url" "$target_url" >/dev/null 2>&1
+}
+
+mihomo_log_has_bind_conflict() {
+  local log_file="$1"
+  [ -s "$log_file" ] && grep -q 'bind: address already in use' "$log_file"
 }
 
 mihomo_process_text_matches() {
@@ -778,9 +824,16 @@ start_existing_mihomo() {
 
   wait_seconds="$(mihomo_start_wait_seconds)"
   for ((attempt = 1; attempt <= wait_seconds; attempt++)); do
+    if mihomo_log_has_bind_conflict "$log_file"; then
+      log_warn "Mihomo 启动失败：配置的本地端口已被其他进程占用"
+      tail -n 40 "$log_file" >&2 || true
+      stop_existing_mihomo
+      return 1
+    fi
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_warn "Mihomo 在打开代理端口前已退出"
       tail -n 40 "$log_file" >&2 || true
+      stop_existing_mihomo
       return 1
     fi
 
@@ -797,6 +850,7 @@ start_existing_mihomo() {
     log_warn "Mihomo 未能监听 $CODEX_PROXY_URL"
   fi
   tail -n 40 "$log_file" >&2 || true
+  stop_existing_mihomo
   return 1
 }
 

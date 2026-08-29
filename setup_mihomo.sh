@@ -270,6 +270,7 @@ inject_proxy_settings() {
   CODEX_PROXY_PORT="$proxy_port" \
   CODEX_MIHOMO_CONTROLLER_BIND="$controller_bind" \
   CODEX_PROXY_GROUP_NAME="$CODEX_PROXY_GROUP" "$YQ_BINARY" eval -i '
+    del(.port, ."socks-port", ."redir-port", ."tproxy-port") |
     ."mixed-port" = (strenv(CODEX_PROXY_PORT) | tonumber) |
     .mode = "rule" |
     ."external-controller" = strenv(CODEX_MIHOMO_CONTROLLER_BIND) |
@@ -304,9 +305,16 @@ start_mihomo() {
 
   wait_seconds="$(mihomo_start_wait_seconds)"
   for ((attempt = 1; attempt <= wait_seconds; attempt++)); do
+    if mihomo_log_has_bind_conflict "$LOG_DIR/mihomo.log"; then
+      log_error "Mihomo 启动失败：配置的本地端口已被其他进程占用"
+      tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true
+      stop_existing_mihomo
+      return 1
+    fi
     if ! kill -0 "$mihomo_pid" >/dev/null 2>&1; then
       log_error "Mihomo 在打开代理端口前已退出"
       tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true
+      stop_existing_mihomo
       return 1
     fi
 
@@ -323,6 +331,7 @@ start_mihomo() {
     log_error "Mihomo 未能监听 $CODEX_PROXY_URL"
   fi
   tail -n 80 "$LOG_DIR/mihomo.log" >&2 || true
+  stop_existing_mihomo
   return 1
 }
 

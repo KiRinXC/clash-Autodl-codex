@@ -35,6 +35,7 @@ if [ "${1:-}" = "eval" ] && [ "${2:-}" = "-i" ]; then
       ;;
   esac
   case "$expression" in *'del(.secret)'*) ;; *) exit 8 ;; esac
+  case "$expression" in *'del(.port, ."socks-port", ."redir-port", ."tproxy-port")'*) ;; *) exit 12 ;; esac
   case "$expression" in *'.profile = (.profile // {})'*) ;; *) exit 11 ;; esac
   case "$expression" in *'.profile."store-selected" = true'*) ;; *) exit 9 ;; esac
   case "$expression" in *'map(select(. != "DIRECT"))) + ["DIRECT"]'*) ;; *) exit 10 ;; esac

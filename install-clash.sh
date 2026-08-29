@@ -36,6 +36,7 @@ export CODEX_AUTODL_REPO_ROOT="$RUNTIME_DIR"
 load_project_config
 CLASH_URL="$(prompt_required "请输入 Clash/Mihomo 订阅 URL" "${CLASH_URL:-}")"
 validate_http_url CLASH_URL "$CLASH_URL"
+resolve_default_mihomo_listener_conflicts
 export PROXY_ENABLED="true"
 staged_config="$(mktemp)"
 trap 'rm -f "$staged_config"' EXIT

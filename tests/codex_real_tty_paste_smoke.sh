@@ -45,7 +45,8 @@ tty_output="$(
 grep -q 'API Key 不能为空' <<< "$tty_output"
 grep -q '^api_key = "tty-pasted-key"$' "$config/api-profile.toml"
 grep -q '^base_url = "https://tty-api.example.invalid/v1"$' "$config/api-profile.toml"
-grep -q '"OPENAI_API_KEY":"tty-pasted-key"' "$data/codex-homes/api/auth.json"
+grep -q '"OPENAI_API_KEY":"tty-pasted-key"' "$data/codex-profiles/api/auth.json"
+cmp -s "$data/codex-profiles/api/auth.json" "$home/.codex/auth.json"
 grep -q '^login --with-api-key$' "$log"
 [ "$(stat -c '%a' "$config/api-profile.toml")" = 600 ]
-[ "$(stat -c '%a' "$data/codex-homes/api/auth.json")" = 600 ]
+[ "$(stat -c '%a' "$data/codex-profiles/api/auth.json")" = 600 ]

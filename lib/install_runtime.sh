@@ -53,7 +53,10 @@ legacy_clash_is_present() {
 saved_codex_is_present() {
   local data
   data="$(install_data_dir)"
-  [ -s "$data/codex-homes/api/config.toml" ] && [ -s "$data/codex-homes/api/auth.json" ]
+  { [ -s "$data/codex-profiles/api/config.toml" ] && [ -s "$data/codex-profiles/api/auth.json" ]; } ||
+    { [ -s "$data/codex-profiles/chatgpt/config.toml" ] && [ -s "$data/codex-profiles/chatgpt/auth.json" ]; } ||
+    { [ -s "$data/codex-homes/api/config.toml" ] && [ -s "$data/codex-homes/api/auth.json" ]; } ||
+    { [ -s "$data/codex-homes/chatgpt/config.toml" ] && [ -s "$data/codex-homes/chatgpt/auth.json" ]; }
 }
 
 write_public_wrapper() {

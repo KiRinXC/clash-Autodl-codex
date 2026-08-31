@@ -20,8 +20,8 @@ cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
-mkdir -p "$home" "$config" "$bin" "$runtime/clash" \
-  "$data/codex-homes/api" "$data/codex-shared/sessions" "$data/codex-shared/sqlite"
+mkdir -p "$home/.codex/sessions" "$config" "$bin" "$runtime/clash" \
+  "$data/codex-profiles/api"
 
 python_cmd="$(command -v python3 || command -v python)"
 "$python_cmd" - "$state_file" "$port_file" >/dev/null 2>&1 <<'PY' &
@@ -94,10 +94,11 @@ CODEX_MIHOMO_CONTROLLER_URL='http://127.0.0.1:$controller_port'
 CODEX_PROXY_GROUP='CodexProxy'
 PROXY_ENABLED='true'
 EOF
-cat > "$data/codex-homes/api/config.toml" <<'EOF'
+cat > "$data/codex-profiles/api/config.toml" <<'EOF'
+cli_auth_credentials_store = "file"
+forced_login_method = "api"
 model_provider = "OpenAI"
 model = "gpt-5.6-sol"
-sqlite_home = "/managed/sqlite"
 
 [model_providers.OpenAI]
 name = "OpenAI"
@@ -105,10 +106,10 @@ base_url = "https://api.example.invalid/v1"
 wire_api = "responses"
 requires_openai_auth = true
 EOF
-printf '%s\n' '{"OPENAI_API_KEY":"test"}' > "$data/codex-homes/api/auth.json"
+cp "$data/codex-profiles/api/config.toml" "$home/.codex/config.toml"
+printf '%s\n' '{"auth_mode":"apiKey","OPENAI_API_KEY":"test"}' > "$data/codex-profiles/api/auth.json"
+cp "$data/codex-profiles/api/auth.json" "$home/.codex/auth.json"
 printf '%s\n' api > "$config/active-auth"
-printf '%s\n' 1 > "$data/codex-shared/.layout-version"
-ln -s "$data/codex-shared/sessions" "$data/codex-homes/api/sessions"
 
 HOME="$home" CLASH_CODEX_AUTODL_CONFIG_DIR="$config" \
   CLASH_CODEX_AUTODL_DATA_DIR="$data" CLASH_CODEX_AUTODL_USER_BIN_DIR="$bin" \
@@ -132,7 +133,7 @@ terminal_status="$(env -i HOME="$home" PATH="/usr/bin:/bin" TERM=dumb \
   /bin/bash --noprofile --rcfile "$home/.bashrc" -i -c exit 2>&1)"
 grep -q '^\[proxy\] 已开启 | 节点: Node A$' <<< "$terminal_status"
 grep -q '^\[codex\] API | https://api.example.invalid/v1$' <<< "$terminal_status"
-grep -q '^\[sync\] 已同步 | 0 个会话$' <<< "$terminal_status"
+grep -q '^\[sync\] 已同步 | 原生会话 0 个$' <<< "$terminal_status"
 
 switch_output="$(printf '2\n' | env -i HOME="$home" PATH="$bin:/usr/bin:/bin" \
   CLASH_CODEX_AUTODL_CONFIG_DIR="$config" CLASH_CODEX_AUTODL_DATA_DIR="$data" \

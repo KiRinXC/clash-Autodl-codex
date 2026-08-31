@@ -118,7 +118,7 @@ uninstall_codex() {
   rm -f "$BIN_DIR/clash-codex" "$BIN_DIR/codex-autodl"
   remove_bashrc_block 'clash-codex-autodl-codex begin' 'clash-codex-autodl-codex end'
   rm -f "$CONFIG_DIR/codex-shell-init.sh"
-  log_ok "Codex 组件已卸载；双认证配置和会话数据已保留"
+  log_ok "Codex 组件已卸载；项目认证快照和原生 CODEX_HOME 数据已保留"
   cleanup_runtime_if_unused
 }
 
@@ -135,7 +135,8 @@ delete_user_data() {
   printf '  %s\n' \
     "$CONFIG_DIR 中的订阅 URL 和 Codex 认证配置" \
     "$RUNTIME_DIR/clash/conf/config.yaml 和运行日志" \
-    "$DATA_DIR/codex-homes" "$DATA_DIR/codex-shared"
+    "$DATA_DIR/codex-profiles（以及旧版本遗留的 codex-homes/codex-shared）"
+  log_warn "不会删除或清空原生 $HOME/.codex"
   if [ "$confirmed" != --yes ]; then
     printf '输入 DELETE 确认: ' >&2
     IFS= read -r answer || answer=""
@@ -150,9 +151,10 @@ delete_user_data() {
   rm -f "$pid_file"
   rm -rf "$RUNTIME_DIR/clash/conf" "$RUNTIME_DIR/clash/logs"
   [ ! -e "$RUNTIME_DIR/.clash-installed" ] || mkdir -p "$RUNTIME_DIR/clash/conf"
-  rm -rf "$DATA_DIR/codex-homes" "$DATA_DIR/codex-shared" "$DATA_DIR/codex-sync.lock"
+  rm -rf "$DATA_DIR/codex-profiles" "$DATA_DIR/codex-homes" \
+    "$DATA_DIR/codex-shared" "$DATA_DIR/codex-sync.lock"
   rm -f "$CONFIG_DIR/config.sh" "$CONFIG_DIR/api-profile.toml" \
-    "$CONFIG_DIR/active-auth" "$CONFIG_DIR/last-verify" \
+    "$CONFIG_DIR/active-auth" "$CONFIG_DIR/last-verify" "$CONFIG_DIR/last-sync" \
     "$CONFIG_DIR"/api-profile.toml.invalid.*
   if [ -e "$RUNTIME_DIR/.clash-installed" ]; then
     mkdir -p "$CONFIG_DIR"

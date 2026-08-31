@@ -80,11 +80,13 @@ HOME="$home" CLASH_CODEX_AUTODL_CONFIG_DIR="$config" \
     mark_component_installed codex
   " >/dev/null
 
-mkdir -p "$data/codex-homes/api" "$data/codex-shared/sessions" \
+mkdir -p "$data/codex-profiles/api" "$data/codex-homes/api" "$data/codex-shared/sessions" \
+  "$home/.codex/sessions" \
   "$runtime/clash/conf/providers" "$runtime/clash/logs"
 printf '%s\n' "CLASH_URL='https://secret-subscription.example.invalid'" > "$config/config.sh"
 printf '%s\n' 'api_key = "secret-key"' 'model_provider = "OpenAI"' > "$config/api-profile.toml"
-printf '%s\n' '{"OPENAI_API_KEY":"secret-key"}' > "$data/codex-homes/api/auth.json"
+printf '%s\n' '{"OPENAI_API_KEY":"secret-key"}' > "$data/codex-profiles/api/auth.json"
+printf '%s\n' 'native-session-preserved' > "$home/.codex/sessions/native.txt"
 printf '%s\n' 'secret-node' > "$runtime/clash/conf/config.yaml"
 printf '%s\n' 'secret-provider' > "$runtime/clash/conf/providers/cache.yaml"
 printf '%s\n' 'secret-log' > "$runtime/clash/logs/mihomo.log"
@@ -101,6 +103,8 @@ grep -q "PROXY_ENABLED='false'" "$config/config.sh"
 ! grep -R -q 'secret-' "$config" "$data" 2>/dev/null
 [ ! -e "$data/codex-homes" ]
 [ ! -e "$data/codex-shared" ]
+[ ! -e "$data/codex-profiles" ]
+[ -s "$home/.codex/sessions/native.txt" ]
 [ ! -e "$runtime/clash/logs" ]
 [ -e "$runtime/.clash-installed" ]
 [ -e "$runtime/.codex-installed" ]
@@ -109,4 +113,4 @@ terminal_status="$(env -i HOME="$home" PATH="/usr/bin:/bin" TERM=dumb \
   /bin/bash --noprofile --rcfile "$home/.bashrc" -i -c exit 2>&1)"
 grep -q '^\[proxy\] 已关闭$' <<< "$terminal_status"
 grep -q '^\[codex\] 未配置$' <<< "$terminal_status"
-grep -q '^\[sync\] 待初始化 | 0 个会话$' <<< "$terminal_status"
+grep -q '^\[sync\] 待同步 | 原生会话 0 个$' <<< "$terminal_status"

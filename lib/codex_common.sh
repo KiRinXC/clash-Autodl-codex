@@ -1269,7 +1269,6 @@ internal_command_path() {
 }
 
 remove_legacy_shell_hook_blocks() {
-  rm -f "$HOME/.codex/clash-autodl-codex.sh" "$HOME/.codex/clash-codex-autodl.sh"
   touch "$HOME/.bashrc"
   sed -i '/# clash-autodl-codex begin/,/# clash-autodl-codex end/d' "$HOME/.bashrc"
   sed -i '/# clash-codex-autodl begin/,/# clash-codex-autodl end/d' "$HOME/.bashrc"

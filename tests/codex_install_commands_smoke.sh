@@ -65,12 +65,14 @@ done
 [ -x "$tmp_data/runtime/command.sh" ]
 [ -s "$tmp_config/api-profile.toml" ]
 grep -q '^api_key = "test-api-key"$' "$tmp_config/api-profile.toml"
-grep -q '^model_provider = "OpenAI"$' "$tmp_data/codex-homes/api/config.toml"
-grep -q '^model = "gpt-5.6-sol"$' "$tmp_data/codex-homes/api/config.toml"
-grep -q '^base_url = "https://api.example.invalid/v1"$' "$tmp_data/codex-homes/api/config.toml"
-grep -q '^network_access = true$' "$tmp_data/codex-homes/api/config.toml"
-! grep -q 'api_key' "$tmp_data/codex-homes/api/config.toml"
-grep -q 'OPENAI_API_KEY' "$tmp_data/codex-homes/api/auth.json"
+grep -q '^model_provider = "OpenAI"$' "$tmp_data/codex-profiles/api/config.toml"
+grep -q '^model = "gpt-5.6-sol"$' "$tmp_data/codex-profiles/api/config.toml"
+grep -q '^base_url = "https://api.example.invalid/v1"$' "$tmp_data/codex-profiles/api/config.toml"
+grep -q '^network_access = true$' "$tmp_data/codex-profiles/api/config.toml"
+! grep -q 'api_key' "$tmp_data/codex-profiles/api/config.toml"
+grep -q 'OPENAI_API_KEY' "$tmp_data/codex-profiles/api/auth.json"
+cmp -s "$tmp_data/codex-profiles/api/auth.json" "$tmp_home/.codex/auth.json"
+grep -q '^forced_login_method = "api"$' "$tmp_home/.codex/config.toml"
 grep -q '^login --with-api-key$' "$fake_log"
 ! grep -q '^exec ' "$fake_log"
 
@@ -83,16 +85,16 @@ grep -q 'API URL: https://api.example.invalid/v1' <<< "$status"
 
 shell_status="$(env "${env_args[@]}" "$tmp_data/runtime/command.sh" codex shell-status)"
 grep -q '^\[codex\] API | https://api.example.invalid/v1$' <<< "$shell_status"
-grep -q '^\[sync\] 已同步 | 0 个会话$' <<< "$shell_status"
+grep -q '^\[sync\] 已同步 | 原生会话 0 个$' <<< "$shell_status"
 [ ! -s "$fake_log" ]
 
 terminal_status="$(env -i HOME="$tmp_home" PATH="/usr/bin:/bin" TERM=dumb \
   /bin/bash --noprofile --rcfile "$tmp_home/.bashrc" -i -c exit 2>&1)"
 grep -q '\[codex\] API | https://api.example.invalid/v1' <<< "$terminal_status"
-grep -q '\[sync\] 已同步 | 0 个会话' <<< "$terminal_status"
+grep -q '\[sync\] 已同步 | 原生会话 0 个' <<< "$terminal_status"
 [ ! -s "$fake_log" ]
 
-before_runtime="$(cksum "$tmp_data/codex-homes/api/config.toml")"
+before_runtime="$(cksum "$tmp_data/codex-profiles/api/config.toml")"
 cat > "$tmp_dir/bad-editor" <<'SH'
 #!/usr/bin/env bash
 sed -i 's#https://api.example.invalid/v1#ftp://invalid.example.invalid/v1#' "$1"
@@ -103,7 +105,7 @@ if env "${env_args[@]}" CODEX_CONFIG_EDITOR="$tmp_dir/bad-editor" \
   printf 'invalid API URL should not be applied\n' >&2
   exit 1
 fi
-[ "$(cksum "$tmp_data/codex-homes/api/config.toml")" = "$before_runtime" ]
+[ "$(cksum "$tmp_data/codex-profiles/api/config.toml")" = "$before_runtime" ]
 
 cat > "$tmp_dir/editor" <<'SH'
 #!/usr/bin/env bash
@@ -111,7 +113,8 @@ sed -i 's#ftp://invalid.example.invalid/v1#https://new-api.example.invalid/v1#' 
 SH
 chmod +x "$tmp_dir/editor"
 env "${env_args[@]}" CODEX_CONFIG_EDITOR="$tmp_dir/editor" "$tmp_bin/codex-config" >/dev/null
-grep -q 'new-api.example.invalid' "$tmp_data/codex-homes/api/config.toml"
+grep -q 'new-api.example.invalid' "$tmp_data/codex-profiles/api/config.toml"
+grep -q 'new-api.example.invalid' "$tmp_home/.codex/config.toml"
 ! grep -q '^exec ' "$fake_log"
 
 env "${env_args[@]}" "$tmp_bin/codex-verify" >/dev/null
@@ -122,7 +125,7 @@ grep -q 'success$' "$tmp_config/last-verify"
 env "${env_args[@]}" bash "$repo_root/uninstall.sh" codex >/dev/null
 [ ! -e "$tmp_bin/codex-status" ]
 [ -s "$tmp_config/api-profile.toml" ]
-[ -s "$tmp_data/codex-homes/api/auth.json" ]
+[ -s "$tmp_data/codex-profiles/api/auth.json" ]
 env "${env_args[@]}" bash "$repo_root/install-codex.sh" </dev/null >/dev/null
 [ -x "$tmp_bin/codex-status" ]
-grep -q 'new-api.example.invalid' "$tmp_data/codex-homes/api/config.toml"
+grep -q 'new-api.example.invalid' "$tmp_data/codex-profiles/api/config.toml"

@@ -11,11 +11,13 @@ runtime="$tmp_data/runtime"
 
 cleanup() { rm -rf "$tmp_dir"; }
 trap cleanup EXIT
-mkdir -p "$tmp_home" "$tmp_config" "$tmp_data/codex-homes/api" "$tmp_data/codex-homes/chatgpt" \
+mkdir -p "$tmp_home" "$tmp_config" "$tmp_data/codex-profiles/api" "$tmp_data/codex-profiles/chatgpt" \
+  "$tmp_data/codex-homes/api" \
   "$tmp_data/codex-shared/sessions"
 printf 'CLASH_URL=%q\n' 'https://subscription.example.invalid' > "$tmp_config/config.sh"
 printf 'api_key = "preserved"\nmodel_provider = "openai"\n' > "$tmp_config/api-profile.toml"
-touch "$tmp_data/codex-homes/api/auth.json" "$tmp_data/codex-homes/chatgpt/auth.json"
+touch "$tmp_data/codex-profiles/api/auth.json" "$tmp_data/codex-profiles/chatgpt/auth.json"
+touch "$tmp_data/codex-homes/api/auth.json"
 touch "$tmp_data/codex-shared/sessions/rollout-preserved.jsonl"
 
 # Old releases stored Clash runtime directories directly under runtime/.
@@ -38,13 +40,13 @@ HOME="$tmp_home" CLASH_CODEX_AUTODL_CONFIG_DIR="$tmp_config" CLASH_CODEX_AUTODL_
 [ ! -e "$tmp_bin/proxy-on" ]
 [ -x "$tmp_bin/codex-status" ]
 [ -s "$tmp_config/config.sh" ]
-[ -e "$tmp_data/codex-homes/api/auth.json" ]
+[ -e "$tmp_data/codex-profiles/api/auth.json" ]
 [ -d "$runtime" ]
 
 HOME="$tmp_home" CLASH_CODEX_AUTODL_CONFIG_DIR="$tmp_config" CLASH_CODEX_AUTODL_DATA_DIR="$tmp_data" \
   CLASH_CODEX_AUTODL_USER_BIN_DIR="$tmp_bin" bash "$repo_root/uninstall.sh" codex >/dev/null
 [ ! -e "$tmp_bin/codex-status" ]
-[ -e "$tmp_data/codex-homes/api/auth.json" ]
+[ -e "$tmp_data/codex-profiles/api/auth.json" ]
 [ -e "$tmp_data/codex-shared/sessions/rollout-preserved.jsonl" ]
 [ -s "$tmp_config/api-profile.toml" ]
 [ ! -d "$runtime" ]
@@ -53,5 +55,6 @@ HOME="$tmp_home" CLASH_CODEX_AUTODL_CONFIG_DIR="$tmp_config" CLASH_CODEX_AUTODL_
 HOME="$tmp_home" CLASH_CODEX_AUTODL_CONFIG_DIR="$tmp_config" CLASH_CODEX_AUTODL_DATA_DIR="$tmp_data" \
   bash "$repo_root/uninstall.sh" data --yes >/dev/null
 [ ! -d "$tmp_config" ]
+[ ! -d "$tmp_data/codex-profiles" ]
 [ ! -d "$tmp_data/codex-homes" ]
 [ ! -d "$tmp_data/codex-shared" ]

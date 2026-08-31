@@ -106,11 +106,14 @@ TOML
 
   grep -q '已备份无效的旧 API 文本配置' <<< "$output"
   grep -q '已迁移旧 API 配置到单文件数据源' <<< "$output"
-  grep -q '检测到已有 API 用户数据，继续使用现有配置' <<< "$output"
+  grep -q '已迁移旧 api 认证快照' <<< "$output"
+  grep -q '已将项目保存的 api 认证恢复到原生 CODEX_HOME' <<< "$output"
   grep -q '^api_key = "preserved-test-key"$' "$config/api-profile.toml"
   grep -q '^openai_base_url = "https://preserved-api.example.invalid/v1"$' "$config/api-profile.toml"
   ! grep -q '^sqlite_home' "$config/api-profile.toml"
-  ! grep -q '^login ' "$log"
+  grep -q '^login --with-api-key$' "$log"
+  [ -s "$data/codex-profiles/api/auth.json" ]
+  [ -s "$home/.codex/auth.json" ]
 }
 
 run_interrupted_case() {

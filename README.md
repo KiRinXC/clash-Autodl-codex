@@ -23,7 +23,7 @@ bash install-clash.sh
 ```text
 [proxy] 已开启 | 节点: Node A
 [codex] API | https://example.com/v1
-[sync] 已同步 | 12 个会话
+[sync] 已同步 | 原生会话 12 个
 ```
 
 ### 代理命令
@@ -39,15 +39,45 @@ bash install-clash.sh
 
 重新运行 `bash install-clash.sh` 可以修改订阅 URL 或重新安装 Clash，不影响 Codex 数据。新订阅会先在临时文件中完成转换和检查，Mihomo 成功启动后才替换现有配置；下载、转换或启动失败时会恢复原配置和代理进程。
 
+### 与 clash-for-AutoDL 的流程对照
+
+本项目逐项对照了 [`VocabVictor/clash-for-AutoDL`](https://github.com/VocabVictor/clash-for-AutoDL) 的 AutoDL 安装流程，但保留当前已经验证过的安全边界：
+
+| 环节 | clash-for-AutoDL | 本项目 |
+| --- | --- | --- |
+| 订阅输入 | 先编辑仓库中的 `.env` | 安装时输入，保存到项目用户配置目录 |
+| 下载与转换 | curl/wget、多 GitHub 镜像、自定义链接转换器 | curl、多镜像、yq 注入；非 YAML 订阅调用独立转换器 |
+| 运行方式 | 仓库目录内 `nohup`，把函数追加到 `.bashrc` | 数据目录内运行；优先 `systemd --user`，AutoDL 无 user systemd 时由交互 shell 恢复 |
+| 启动判断 | 进程启动后测试公网请求 | 分开判断进程、本地端口、Controller；公网出口只作为独立诊断，不阻塞基础 readiness |
+| 代理开关 | 当前 shell 的 `proxy_on/proxy_off` | `proxy-on/proxy-off` 同时维护永久状态、进程和当前 shell 环境 |
+| 节点控制 | 主要通过 Dashboard | `proxy-switch/status` 使用 loopback Controller，节点选择由 Mihomo 持久化 |
+| 重装失败 | 直接操作仓库内配置 | staged 下载/转换/节点检查、原子替换和启动失败回滚 |
+
+参考仓库需要用户自行安装 `lsof`；本项目会依次使用 `ss`、`lsof` 或本地 TCP 连接检查，不把 `lsof` 设为硬依赖。若默认端口确实已被占用，本项目不会杀死未知进程，而是自动选择备用端口。生成配置时会删除订阅原有的 `port`、`socks-port`、`redir-port` 和 `tproxy-port`，只设置项目使用的 `mixed-port`，避免 Mihomo 自身的多个 listener 争用同一端口。
+
 ## Codex 安装
 
 ```bash
 bash install-codex.sh
 ```
 
-如果 `PATH` 中已经存在可用的 Codex CLI，脚本会直接复用它，不会覆盖该程序，也不会在卸载项目组件时删除它；只有找不到 Codex 时才会尝试安装。无论 Codex CLI 是预先安装还是由本项目安装，都需要执行一次上面的脚本，以部署本项目自己的 `codex-*` 管理命令、shell hook 和双认证配置。这些命令不是 Codex CLI 自带的。
+如果 `PATH` 中已经存在可用的 Codex CLI，脚本会直接复用它，不会覆盖该程序，也不会在卸载项目组件时删除它；只有找不到 Codex 时才会尝试安装。无论 Codex CLI 是预先安装还是由本项目安装，都需要执行一次上面的脚本，以部署本项目自己的 `codex-*` 管理命令和 shell hook。这些命令不是 Codex CLI 自带的。
 
-脚本会先用 `codex --version` 确认可执行文件确实可用，再安装管理命令并等待输入 API 地址和 API Key。因此配置输入意外中断后，重新打开终端仍可使用 `codex-status` 查看状态，并可重新运行 `bash install-codex.sh` 继续配置。API 默认使用自定义 Provider ID `OpenAI`，ChatGPT 登录使用内置 Provider ID `openai`；两者不同是正常的。
+脚本先用 `codex --version` 确认可执行文件可用，再按以下顺序选择初始配置：
+
+1. 继续使用项目数据目录中已经保存的活动配置；
+2. 如果项目已经保存了可用的 API 单文件配置，用它恢复项目 API 档案；
+3. 否则识别原生 `CODEX_HOME` 中的 API 或 ChatGPT 登录；
+4. 如果原凭据是文件型 `auth.json`，将当前认证保存为项目目录中的快照，并继续直接使用原生 `CODEX_HOME`；
+5. 只有没有任何可复用配置时，才询问 API 地址和 API Key。
+
+因此，电脑或服务器上已经完成文件型登录的 Codex 不需要重新安装，也不需要再次输入同一种认证。脚本只建立当前认证对应的一套项目快照；另一套认证等首次执行 `codex-switch` 时再配置。识别和保存不发起模型请求。
+
+如果 Codex 把凭据保存在系统 keyring，脚本仍能识别认证方式，但无法把它保存为切换时可完整覆盖的 `auth.json`。安装会要求使用同一种原生登录重新生成文件型凭据：ChatGPT 使用 `codex login --device-auth`，API 重新输入 Key。项目不会尝试读取或复制 keyring 项。
+
+当前 Codex 还可能报告 access token、personal access token、workload identity 或 Amazon Bedrock 认证。本项目的切换模型明确只有 API Key 与 ChatGPT 两套，因此只识别并提示这些额外方式，不把它们错误归类或复制；原认证仍保持不变。
+
+API 默认使用自定义 Provider ID `OpenAI`，ChatGPT 默认使用内置 Provider ID `openai`；导入已有配置时保留原来的 `model_provider`，所以它也可能是其他名称。Provider ID 与认证方式是两个不同概念。
 
 API Key 使用隐藏输入，右键粘贴后终端不会显示星号或任何字符，按 Enter 即可。脚本会清理常见的终端括号粘贴标记和 `CR` 字符；如果第一次粘贴没有生效，可以直接重试，提示信息不会写入 Key。
 
@@ -59,12 +89,12 @@ API Key 使用隐藏输入，右键粘贴后终端不会显示星号或任何字
 | --- | --- |
 | `codex-verify` | 用当前配置执行一次临时真实调用，并保存验证结果和时间 |
 | `codex-status` | 离线显示当前配置；API 显示 URL，ChatGPT 显示 `ChatGPT` |
-| `codex-switch` | 自动切换到另一套配置并同步会话，不接受目标参数 |
-| `codex-sync` | 手动同步当前配置的会话，不切换配置 |
-| `codex-config` | API 打开单文件配置；ChatGPT 重新执行设备登录 |
+| `codex-switch` | 自动切换到另一套认证；完整替换 `auth.json`、定向更新 `config.toml` |
+| `codex-sync` | 保存当前认证快照，并把原生会话的 provider 对齐到当前配置 |
+| `codex-config` | API 打开单文件配置；ChatGPT 执行原生设备码登录 |
 | `codex ...` | 使用当前配置运行 Codex CLI |
 
-首次从 API 切换到 ChatGPT 时，`codex-switch` 会运行设备登录。之后两套配置之间直接切换。当前为 ChatGPT 时运行 `codex-config` 会重新登录，但会保留原配置中的模型等非认证设置。
+首次切换到尚未配置的 ChatGPT 时，`codex-switch` 会在原生 `CODEX_HOME` 上运行 `codex login --device-auth`；首次切换到尚未配置的 API 时，才会询问 API 地址和 Key。之后两套认证之间直接切换。切换前必须关闭其他 Codex CLI/Codex App 进程。
 
 ### API 单文件配置
 
@@ -99,25 +129,28 @@ requires_openai_auth = true
 network_access = true
 ```
 
-上述默认项通过当前 Codex CLI 的严格配置检查。旧配置中的顶层 `disable_response_storage`、`network_access = "enabled"` 和 `windows_wsl_setup_acknowledged` 已不被当前严格模式接受，因此不再自动写入；联网权限使用当前的 `sandbox_workspace_write.network_access = true`。
+上述默认项通过当前 Codex CLI 的严格配置检查。当前规则中，`wire_api` 只支持 `responses`；内置 provider id `openai`、`ollama` 和 `lmstudio` 是保留名称，不能用 `[model_providers.openai]` 等表覆盖。自定义 Provider 应使用其他、大小写完全一致的 ID。顶层 `disable_response_storage` 和字符串形式的 `network_access = "enabled"` 不在当前配置 schema 中，因此默认配置不再写入；联网权限使用 `sandbox_workspace_write.network_access = true`。`windows_wsl_setup_acknowledged` 仍是合法的 Windows 专用字段，但 Linux 默认配置不需要它。
 
-该文件本身是合法 TOML。`codex-config` 按 `CODEX_CONFIG_EDITOR`、`VISUAL`、`EDITOR`、`nano`、`vim`、`vi` 的顺序选择编辑器。保存后，脚本会将除 `api_key` 以外的内容生成运行用 `config.toml`，并让当前 Codex CLI 生成 `auth.json`。
+该文件本身是合法 TOML。`codex-config` 按 `CODEX_CONFIG_EDITOR`、`VISUAL`、`EDITOR`、`nano`、`vim`、`vi` 的顺序选择编辑器。保存后，脚本让 Codex CLI 在原生 `CODEX_HOME` 中执行 `login --with-api-key`，完整生成 `auth.json`；`config.toml` 只定向更新认证、模型和当前 Provider 字段/表，其他用户配置保持不变。
 
-如果旧的 `api-profile.toml` 为空、缺少 `api_key`、缺少 `model_provider` 或 TOML 已损坏，重新运行安装脚本会先将它备份为 `api-profile.toml.invalid.<时间>.<进程号>`，再重新询问 API 地址和 Key。新配置成功前，已经可用的运行配置不会被覆盖。
+如果旧的 `api-profile.toml` 为空、缺少 `api_key` 或 TOML 已损坏，重新运行安装脚本会先将它备份为 `api-profile.toml.invalid.<时间>.<进程号>`，再重新询问 API 地址和 Key。`model_provider` 可以省略，此时 Codex 使用内置 `openai`；官方 OpenAI API 也可以不写 `openai_base_url`。新配置成功前，已经可用的运行配置不会被覆盖。
 
 `model_provider` 是配置 ID，不是认证方式。若使用自定义 `[model_providers.<id>]`，必须保证它与顶层 `model_provider = "<id>"` 完全一致。
 
-### 会话同步
+### 原生 CODEX_HOME 与同步
 
-API 和 ChatGPT 凭据分别位于独立 `CODEX_HOME`，会话、附件和 SQLite 状态放在共享目录：
+Codex 始终使用原生 `~/.codex`（或用户显式设置的 `CODEX_HOME`）。项目不会创建第二套 `CODEX_HOME`，不会创建 `codex-shared`，不会搬运/合并会话，也不会把 `sessions`、附件或 SQLite 路径替换成软链接。
+
+项目只在自己的数据目录保存两套认证快照：
 
 ```text
-~/.local/share/clash-codex-autodl/codex-homes/api/
-~/.local/share/clash-codex-autodl/codex-homes/chatgpt/
-~/.local/share/clash-codex-autodl/codex-shared/
+~/.local/share/clash-codex-autodl/codex-profiles/api/
+~/.local/share/clash-codex-autodl/codex-profiles/chatgpt/
 ```
 
-切换和手动同步前必须关闭其他 Codex CLI 或 Codex App 进程。同步使用互斥锁，成功后才更新当前配置指针；会话中的 `model_provider` 会按目标配置调整。无法自动合并的文件保存在 `codex-shared/import-conflicts/`，源文件不会被删除。
+每套快照包含完整 `auth.json` 和一份只含受管理字段的 `config.toml` 片段。切换时，目标 `auth.json` 完整覆盖原生文件；`config.toml` 只替换认证方式、模型选择、当前 Provider 及对应 Provider 表，保留审批、MCP、通知等无关配置。
+
+为了让同一会话能在 API 与 ChatGPT 之间继续，切换和 `codex-sync` 会扫描原生 `sessions/` 与 `archived_sessions/` 下的 `rollout-*.jsonl`，只把首条 `session_meta.payload.model_provider` 改成目标配置的 Provider。其余会话记录、顺序、附件和目录结构保持不变；写入失败时恢复本轮已经修改的文件。`codex-sync` 同时保存 Codex 使用过程中可能刷新的 token 和当前受管理配置。
 
 ## 用户数据与卸载
 
@@ -128,10 +161,10 @@ bash uninstall.sh data
 ```
 
 - `clash`：停止并卸载 Mihomo、代理命令和服务，保留订阅 URL。
-- `codex`：卸载本项目安全管理且文件指纹未发生变化的 Codex CLI 和包装命令，保留 API、ChatGPT 和会话数据；预先存在或后来被替换的 Codex CLI 不会删除。
-- `data`：列出并永久删除订阅、Mihomo 运行配置和日志、双认证配置、会话、附件和迁移备份，需要输入 `DELETE` 二次确认。如果组件仍在安装状态，管理命令和 shell hook 会保留，代理会关闭，新终端显示 Codex 未配置；重新运行相应安装脚本即可配置。
+- `codex`：卸载本项目安全管理且文件指纹未发生变化的 Codex CLI 和包装命令，保留项目认证快照以及原生 Codex 数据；预先存在或后来被替换的 Codex CLI 不会删除。
+- `data`：列出并永久删除订阅、Mihomo 运行配置和日志、项目保存的双认证快照及旧版本遗留数据，需要输入 `DELETE` 二次确认。原生 `~/.codex` 不会被删除。如果组件仍在安装状态，管理命令和 shell hook 会保留，代理会关闭；重新运行相应安装脚本即可配置。
 
-自动化环境可以明确使用 `bash uninstall.sh data --yes`。用户原有的 `~/.codex` 始终不会被删除或覆盖。
+自动化环境可以明确使用 `bash uninstall.sh data --yes`。卸载和删除项目数据始终不会删除原生 `~/.codex`；认证安装/切换只会按上述规则替换其中的 `auth.json` 并定向修改 `config.toml`，不会操作其他原生文件或目录。
 
 重新安装时会复用已保留数据。旧版本的 API 档案会尽可能迁移到 `api-profile.toml`；迁移成功前不会删除旧数据。
 
@@ -140,9 +173,9 @@ bash uninstall.sh data
 ```text
 ~/.local/bin/                                      # 公开 proxy-* / codex-* 命令
 ~/.local/share/clash-codex-autodl/runtime/         # 可重装的运行文件和 Clash 组件
-~/.local/share/clash-codex-autodl/codex-homes/     # API、ChatGPT 认证配置
-~/.local/share/clash-codex-autodl/codex-shared/    # 共享会话数据
+~/.local/share/clash-codex-autodl/codex-profiles/  # API、ChatGPT 认证快照
 ~/.config/clash-codex-autodl/                      # 订阅、API 单文件和当前配置指针
+~/.codex/                                          # Codex 原生目录；项目只操作 auth.json/config.toml
 ```
 
 含 Key、token 或订阅 URL 的文件权限设置为 `600`。不要把这些目录提交到 Git 或发送到公开日志。

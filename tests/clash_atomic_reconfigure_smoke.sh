@@ -117,7 +117,6 @@ CODEX_PROXY_GROUP='CodexProxy'
 PROXY_ENABLED='true'
 EOF
 before_config="$(cksum "$runtime/clash/conf/config.yaml")"
-before_user_config="$(cksum "$config/config.sh")"
 
 if printf '%s\n' 'https://broken-subscription.example.invalid/clash.yaml' | \
   HOME="$home" PATH="$fake_bin:$PATH" FAKE_CLASH_CONF="$runtime/clash/conf" \
@@ -132,9 +131,15 @@ if printf '%s\n' 'https://broken-subscription.example.invalid/clash.yaml' | \
 fi
 
 [ "$(cksum "$runtime/clash/conf/config.yaml")" = "$before_config" ]
-[ "$(cksum "$config/config.sh")" = "$before_user_config" ]
-grep -q 'working-subscription.example.invalid' "$config/config.sh"
+grep -q 'broken-subscription.example.invalid' "$config/config.sh"
 grep -q '^old-config: true$' "$runtime/clash/conf/config.yaml"
+
+retry_output="$(HOME="$home" PATH="$fake_bin:$PATH" FAKE_CLASH_CONF="$runtime/clash/conf" \
+  CLASH_CODEX_AUTODL_CONFIG_DIR="$config" \
+  CLASH_CODEX_AUTODL_DATA_DIR="$data" \
+  CLASH_CODEX_AUTODL_USER_BIN_DIR="$bin" \
+  bash "$repo_root/install-clash.sh" </dev/null 2>&1 || true)"
+grep -Fq '请输入 Clash/Mihomo 订阅 URL [https://broken-subscription.example.invalid/clash.yaml]:' <<< "$retry_output"
 new_pid="$(cat "$runtime/clash/mihomo.pid")"
 kill -0 "$new_pid"
 mapfile -t started_pids < "$pid_log"

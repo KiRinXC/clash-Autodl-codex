@@ -41,7 +41,7 @@ download_github_file() {
   local github_path="$1"
   local output_file="$2"
   local description="$3"
-  local mirror url retries max_time
+  local mirror url retries max_time attempt_file
 
   for mirror in "${GITHUB_MIRRORS[@]}"; do
     url="https://${mirror}${github_path}"
@@ -49,16 +49,21 @@ download_github_file() {
     max_time=180
     if [ "$mirror" = "github.com" ]; then
       retries=0
-      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 30 GITHUB_DIRECT_MAX_TIME)"
+      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 180 GITHUB_DIRECT_MAX_TIME)"
     fi
     log_info "正在从 $mirror 下载 $description"
+    # A partial response is resumable only against the same origin. Keep each
+    # mirror isolated so a fallback cannot append to an incompatible artifact.
+    attempt_file="$(mktemp "${output_file}.mirror.XXXXXX")"
     if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \
-      -o "$output_file" "$url"; then
-      if [ -s "$output_file" ]; then
+      -o "$attempt_file" "$url"; then
+      if [ -s "$attempt_file" ]; then
+        mv "$attempt_file" "$output_file"
         log_ok "$description 下载完成"
         return 0
       fi
     fi
+    rm -f "$attempt_file"
   done
 
   log_error "$description 下载失败"

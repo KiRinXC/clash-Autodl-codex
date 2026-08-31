@@ -220,6 +220,15 @@ save_project_config() {
   chmod 600 "$config_file" 2>/dev/null || true
 }
 
+persist_subscription_url() {
+  local subscription_url="$1"
+  # Persist the user's last valid URL before network work starts. Other
+  # runtime values are the currently loaded values and are intentionally left
+  # untouched if staged installation later fails.
+  CLASH_URL="$subscription_url"
+  save_project_config
+}
+
 validate_http_url() {
   local name="$1"
   local value="$2"
@@ -1187,7 +1196,7 @@ install_codex_cli_from_github_release() {
     max_time=240
     if [ "$mirror" = "github.com" ]; then
       retries=0
-      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 30 GITHUB_DIRECT_MAX_TIME)"
+      max_time="$(positive_integer_or_default "${GITHUB_DIRECT_MAX_TIME:-}" 180 GITHUB_DIRECT_MAX_TIME)"
     fi
     log_info "正在从 $mirror 下载 Codex CLI"
     if curl -fsSL -C - --retry "$retries" --connect-timeout 10 --max-time "$max_time" \

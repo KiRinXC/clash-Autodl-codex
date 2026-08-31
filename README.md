@@ -37,7 +37,7 @@ bash install-clash.sh
 
 `proxy-on` 和 `proxy-off` 在已经加载 shell hook 的终端中也会立即修改当前终端环境。作为外部脚本直接执行时，子进程无法修改父 shell；这种情况下重新打开终端即可应用环境变化。
 
-重新运行 `bash install-clash.sh` 可以修改订阅 URL 或重新安装 Clash，不影响 Codex 数据。新订阅会先在临时文件中完成转换和检查，Mihomo 成功启动后才替换现有配置；下载、转换或启动失败时会恢复原配置和代理进程。
+重新运行 `bash install-clash.sh` 可以修改订阅 URL 或重新安装 Clash，不影响 Codex 数据。合法 URL 会在下载开始前保存，因此即使下载失败，下次运行仍会显示上次输入的地址。新订阅会先在临时文件中完成转换和检查，Mihomo 成功启动后才替换现有配置；下载、转换或启动失败时会恢复原运行配置和代理进程。
 
 ### 与 clash-for-AutoDL 的流程对照
 
@@ -53,7 +53,7 @@ bash install-clash.sh
 | 节点控制 | 主要通过 Dashboard | `proxy-switch/status` 使用 loopback Controller，节点选择由 Mihomo 持久化 |
 | 重装失败 | 直接操作仓库内配置 | staged 下载/转换/节点检查、原子替换和启动失败回滚 |
 
-参考仓库需要用户自行安装 `lsof`；本项目会依次使用 `ss`、`lsof` 或本地 TCP 连接检查，不把 `lsof` 设为硬依赖。若默认端口确实已被占用，本项目不会杀死未知进程，而是自动选择备用端口。生成配置时会删除订阅原有的 `port`、`socks-port`、`redir-port` 和 `tproxy-port`，只设置项目使用的 `mixed-port`，避免 Mihomo 自身的多个 listener 争用同一端口。
+参考仓库需要用户自行安装 `lsof`；本项目会依次使用 `ss`、`lsof` 或本地 TCP 连接检查，不把 `lsof` 设为硬依赖。GitHub 文件下载会对每个镜像使用独立临时文件，切换镜像时不会续传上一个镜像的半截文件；直连默认最多等待 180 秒，可用 `GITHUB_DIRECT_MAX_TIME` 覆盖。若默认端口确实已被占用，本项目不会杀死未知进程，而是自动选择备用端口。生成配置时会删除订阅原有的 `port`、`socks-port`、`redir-port` 和 `tproxy-port`，只设置项目使用的 `mixed-port`，避免 Mihomo 自身的多个 listener 争用同一端口。
 
 ## Codex 安装
 

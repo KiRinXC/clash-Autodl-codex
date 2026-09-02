@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-# Codex keeps all conversation state in its native CODEX_HOME. This project
-# must not create a second session tree, move rollouts, or install symlinks
-# below ~/.codex. Authentication snapshots live outside CODEX_HOME; only the
-# session_meta provider field is rewritten when authentication changes.
-
 codex_process_is_running() {
   ps -eo pid=,comm=,args= 2>/dev/null | awk -v self="$$" '
     $1 != self && ($2 ~ /^(codex|codex-cli)$/ || $0 ~ /(^|[[:space:]])codex(-cli)?([[:space:]]|$)/ || $0 ~ /\/@openai\/codex\/[^[:space:]]*/) { found = 1 }
@@ -12,30 +7,77 @@ codex_process_is_running() {
   '
 }
 
-codex_rewrite_native_session_providers() {
-  local target_provider="$1" native_home work python_bin result changed skipped
+codex_config_sqlite_home() {
+  local config_file="$1"
+  [ -f "$config_file" ] || return 0
+  sed -n 's/^[[:space:]]*sqlite_home[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -n 1
+}
+
+codex_native_state_database_path() {
+  local config_file="$1" native configured candidate
+  native="$(codex_native_home)"
+  configured="$(codex_config_sqlite_home "$config_file")"
+  if [ -n "$configured" ]; then
+    configured="$(printf '%s' "$configured" | sed "s#^~#$HOME#")"
+    case "$configured" in
+      /*) candidate="$configured/state_5.sqlite" ;;
+      *) candidate="$native/$configured/state_5.sqlite" ;;
+    esac
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  fi
+  for candidate in "$native/sqlite/state_5.sqlite" "$native/state_5.sqlite"; do
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+codex_native_state_database_candidates() {
+  local config_file="$1" native configured candidate
+  native="$(codex_native_home)"
+  configured="$(codex_config_sqlite_home "$config_file")"
+  if [ -n "$configured" ]; then
+    configured="$(printf '%s' "$configured" | sed "s#^~#$HOME#")"
+    case "$configured" in
+      /*) candidate="$configured/state_5.sqlite" ;;
+      *) candidate="$native/$configured/state_5.sqlite" ;;
+    esac
+    [ -f "$candidate" ] && printf '%s\n' "$candidate"
+  fi
+  for candidate in "$native/sqlite/state_5.sqlite" "$native/state_5.sqlite"; do
+    [ -f "$candidate" ] && printf '%s\n' "$candidate"
+  done | awk '!seen[$0]++'
+}
+
+codex_sync_native_session_state() {
+  local target_provider="$1" config_file="$2"
+  local native_home work python_bin result changed sqlite_changed skipped database="" database_candidates=""
   local source_file output_file first_line escaped_provider index applied_index
   local -a fallback_sources fallback_originals fallback_outputs
+  [ -n "$config_file" ] || config_file="$(codex_native_config_file)"
   [ -n "$target_provider" ] || { log_error "目标 model_provider 不能为空"; return 1; }
   native_home="$(codex_native_home)"
+  database_candidates="$(codex_native_state_database_candidates "$config_file")"
   mkdir -p "$(project_data_dir)"
-  work="$(mktemp -d "$(project_data_dir)/.session-provider-sync.XXXXXX")"
+  work="$(mktemp -d "$(project_data_dir)/.session-state-sync.XXXXXX")"
 
   if python_bin="$(python_command 2>/dev/null)"; then
     if ! result="$("$python_bin" - "$native_home/sessions" "$native_home/archived_sessions" \
-      "$target_provider" "$work" <<'PY'
+      "$target_provider" "$database_candidates" "$work" <<'PY'
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import sys
 
 roots = sys.argv[1:3]
 target_provider = sys.argv[3]
-work = sys.argv[4]
+candidate_text = sys.argv[4]
+work = sys.argv[5]
+updates = []
 skipped = 0
 errors = []
-updates = []
+total_rollouts = 0
 
 for root in roots:
     if not os.path.isdir(root):
@@ -44,6 +86,7 @@ for root in roots:
         for name in files:
             if not (name.startswith("rollout-") and name.endswith(".jsonl")):
                 continue
+            total_rollouts += 1
             path = os.path.join(directory, name)
             try:
                 with open(path, "rb") as source:
@@ -68,11 +111,9 @@ for root in roots:
                 if payload.get("model_provider") == target_provider:
                     continue
                 payload["model_provider"] = target_provider
-                replacement = json.dumps(
-                    record, ensure_ascii=False, separators=(",", ":")
-                ).encode("utf-8") + line_ending + rest
+                replacement = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + line_ending + rest
                 updates.append((path, original, replacement, os.stat(path)))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, RuntimeError) as exc:
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
                 errors.append(f"{path}: {exc}")
 
 if errors:
@@ -80,8 +121,44 @@ if errors:
         print(error, file=sys.stderr)
     raise SystemExit(1)
 
+rollout_count = total_rollouts
+database = None
+database_options = [path for path in candidate_text.splitlines() if path]
+database_scores = []
+for priority, path in enumerate(database_options):
+    try:
+        connection = sqlite3.connect(path, timeout=2)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(threads)")}
+        if "model_provider" not in columns:
+            connection.close()
+            continue
+        rows = connection.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+        connection.close()
+        database_scores.append((abs(rows - rollout_count), -rows, -os.path.getmtime(path), priority, path))
+    except sqlite3.Error:
+        continue
+if database_scores:
+    database = sorted(database_scores)[0][-1]
+
+db_connection = None
+sqlite_changed = 0
 applied = []
 try:
+    if database:
+        db_connection = sqlite3.connect(database, timeout=5)
+        db_connection.execute("PRAGMA busy_timeout=5000")
+        columns = {row[1] for row in db_connection.execute("PRAGMA table_info(threads)")}
+        if "model_provider" not in columns:
+            db_connection.close()
+            db_connection = None
+        else:
+            db_connection.execute("BEGIN IMMEDIATE")
+            cursor = db_connection.execute(
+                "UPDATE threads SET model_provider = ? WHERE COALESCE(model_provider, '') COLLATE BINARY <> (? COLLATE BINARY)",
+                (target_provider, target_provider),
+            )
+            sqlite_changed = cursor.rowcount
+
     for index, (path, original, replacement, file_stat) in enumerate(updates):
         staged = os.path.join(work, f"rewrite-{index}.tmp")
         with open(staged, "wb") as target:
@@ -96,8 +173,22 @@ try:
         verified = json.loads(verify_first.decode("utf-8"))
         if verified.get("payload", {}).get("model_provider") != target_provider:
             raise RuntimeError(f"{path}: provider verification failed")
-except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, RuntimeError) as exc:
+
+    if db_connection is not None:
+        remaining = db_connection.execute(
+            "SELECT COUNT(*) FROM threads WHERE COALESCE(model_provider, '') COLLATE BINARY <> (? COLLATE BINARY)",
+            (target_provider,),
+        ).fetchone()[0]
+        if remaining:
+            raise RuntimeError(f"state database still contains {remaining} mismatched rows")
+        db_connection.commit()
+        db_connection.close()
+        db_connection = None
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, sqlite3.Error, TypeError, RuntimeError) as exc:
     print(str(exc), file=sys.stderr)
+    if db_connection is not None:
+        db_connection.rollback()
+        db_connection.close()
     for path, original, file_stat in applied:
         try:
             with open(path, "wb") as restore:
@@ -109,16 +200,22 @@ except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, RuntimeErr
             print(f"{path}: rollback failed: {restore_error}", file=sys.stderr)
     raise SystemExit(1)
 
-print(f"{len(updates)} {skipped}")
+print(f"{len(updates)} {sqlite_changed} {skipped}")
 PY
 )"; then
       rm -rf "$work"
-      log_error "会话 provider 元数据同步失败；未成功修改的文件保持原样"
+      log_error "Codex 会话或 state_5.sqlite 同步失败；未成功修改的文件保持原样"
       return 1
     fi
-    read -r changed skipped <<< "$result"
+    read -r changed sqlite_changed skipped <<< "$result"
   else
+    if [ -n "$database_candidates" ]; then
+      rm -rf "$work"
+      log_error "同步 state_5.sqlite 需要 Python 3；请安装 Python 后重试"
+      return 1
+    fi
     changed=0
+    sqlite_changed=0
     skipped=0
     case "$target_provider" in
       '' | *[!A-Za-z0-9._-]*)
@@ -128,6 +225,7 @@ PY
         ;;
     esac
     escaped_provider="$(printf '%s' "$target_provider" | sed 's/[&|]/\\&/g')"
+    output_file="$work/rewrite.tmp"
     fallback_sources=()
     fallback_originals=()
     fallback_outputs=()
@@ -138,36 +236,25 @@ PY
         skipped=$((skipped + 1))
         continue
       fi
-      output_file="$work/rewrite-$index.tmp"
       if printf '%s\n' "$first_line" | grep -Eq '"model_provider"[[:space:]]*:'; then
-        if ! sed -E "1 s|\"model_provider\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"model_provider\":\"$escaped_provider\"|" \
-          "$source_file" > "$output_file"; then
-          rm -rf "$work"
-          log_error "无法读取会话文件: $source_file"
-          return 1
-        fi
+        sed -E "1 s|\"model_provider\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"model_provider\":\"$escaped_provider\"|" "$source_file" > "$output_file"
       else
-        if ! sed -E "1 s|\"payload\"[[:space:]]*:[[:space:]]*\{|\"payload\":{\"model_provider\":\"$escaped_provider\",|" \
-          "$source_file" > "$output_file"; then
-          rm -rf "$work"
-          log_error "无法读取会话文件: $source_file"
-          return 1
-        fi
+        sed -E "1 s|\"payload\"[[:space:]]*:[[:space:]]*\{|\"payload\":{\"model_provider\":\"$escaped_provider\",|" "$source_file" > "$output_file"
       fi
       if cmp -s "$source_file" "$output_file"; then
         continue
       fi
       fallback_sources+=("$source_file")
       fallback_originals+=("$work/original-$index.tmp")
-      fallback_outputs+=("$output_file")
-      if ! cp "$source_file" "$work/original-$index.tmp"; then
+      fallback_outputs+=("$work/output-$index.tmp")
+      if ! cp "$source_file" "${fallback_originals[$index]}" ||
+        ! cp "$output_file" "${fallback_outputs[$index]}"; then
         rm -rf "$work"
-        log_error "无法暂存会话回退副本: $source_file"
+        log_error "无法暂存会话 provider 回退副本: $source_file"
         return 1
       fi
       index=$((index + 1))
-    done < <(find "$native_home/sessions" "$native_home/archived_sessions" \
-      -type f -name 'rollout-*.jsonl' -print0 2>/dev/null)
+    done < <(find "$native_home/sessions" "$native_home/archived_sessions" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null)
     for index in "${!fallback_sources[@]}"; do
       if ! cp "${fallback_outputs[$index]}" "${fallback_sources[$index]}"; then
         for ((applied_index = 0; applied_index < index; applied_index++)); do
@@ -182,14 +269,21 @@ PY
   fi
 
   rm -rf "$work"
-  if [ "${changed:-0}" -gt 0 ]; then
-    log_ok "已将 $changed 个原生会话的 model_provider 对齐为 $target_provider"
+  if [ "$changed" -gt 0 ] || [ "$sqlite_changed" -gt 0 ]; then
+    log_ok "已同步会话 provider: $changed 个 rollout，$sqlite_changed 条 SQLite 索引 -> $target_provider"
   else
-    log_info "原生会话 provider 已是 $target_provider"
+    log_info "会话 provider 和 SQLite 索引已是 $target_provider"
   fi
-  if [ "${skipped:-0}" -gt 0 ]; then
+  if [ -n "$database" ] && [ "$database" != - ]; then
+    log_info "使用的 Codex state database: $database"
+  fi
+  if [ "$skipped" -gt 0 ]; then
     log_warn "跳过 $skipped 个没有有效 session_meta 的 rollout 文件"
   fi
+}
+
+codex_rewrite_native_session_providers() {
+  codex_sync_native_session_state "$1" "$(codex_native_config_file)"
 }
 
 codex_sync_native_sessions_to_profile() {
@@ -197,7 +291,7 @@ codex_sync_native_sessions_to_profile() {
   codex_profile_is_configured "$profile" || { log_error "$profile 配置尚未完成"; return 1; }
   profile_config="$(codex_profile_home "$profile")/config.toml"
   provider="$(codex_config_model_provider "$profile_config")"
-  codex_rewrite_native_session_providers "$provider"
+  codex_sync_native_session_state "$provider" "$(codex_native_config_file)"
 }
 
 codex_native_session_rollout_count() {
@@ -214,17 +308,18 @@ codex_session_rollout_count() {
 }
 
 codex_session_sync_is_initialized() {
-  # A single native CODEX_HOME needs no project-managed session initialization.
   return 0
 }
 
 codex_initialize_session_sync() {
-  # Compatibility no-op for older callers. Deliberately performs no writes.
   return 0
 }
 
 codex_sessions_status() {
-  log_ok "会话: 使用 Codex 原生目录（切换时仅同步 session_meta.model_provider）"
+  local database
+  log_ok "会话: 使用 Codex 原生目录（切换时同步 rollout 与 SQLite provider）"
   log_info "原生 CODEX_HOME: $(codex_native_home)"
   log_info "Rollout 数量: $(codex_native_session_rollout_count)"
+  database="$(codex_native_state_database_path "$(codex_native_config_file)" 2>/dev/null || true)"
+  [ -z "$database" ] || log_info "State database: $database"
 }

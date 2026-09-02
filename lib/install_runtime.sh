@@ -24,6 +24,7 @@ deploy_runtime() {
   cp "$source_dir/lib/codex_common.sh" "$runtime/lib/codex_common.sh"
   cp "$source_dir/lib/codex_profiles.sh" "$runtime/lib/codex_profiles.sh"
   cp "$source_dir/lib/codex_sessions.sh" "$runtime/lib/codex_sessions.sh"
+  cp "$source_dir/lib/codex_toml_merge.py" "$runtime/lib/codex_toml_merge.py"
   chmod +x "$runtime/command.sh" "$runtime/setup_mihomo.sh" "$runtime/converter.sh" "$runtime/uninstall.sh"
   rm -f "$bin_dir/clash-codex" "$bin_dir/codex-autodl"
 }

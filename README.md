@@ -148,9 +148,9 @@ Codex 始终使用原生 `~/.codex`（或用户显式设置的 `CODEX_HOME`）�
 ~/.local/share/clash-codex-autodl/codex-profiles/chatgpt/
 ```
 
-每套快照包含完整 `auth.json` 和一份只含受管理字段的 `config.toml` 片段。切换时，目标 `auth.json` 完整覆盖原生文件；`config.toml` 只替换认证方式、模型选择、当前 Provider 及对应 Provider 表，保留审批、MCP、通知等无关配置。
+每套快照包含完整 `auth.json` 和完整的可切换 `config.toml` 配置（API Key 仍单独保存在 `api-profile.toml`，`sqlite_home` 这类本机共享路径不参与切换）。切换时，目标 `auth.json` 完整覆盖原生文件；目标 `config.toml` 作为配置层合并到当前原生配置，认证路由字段按目标配置清理/替换，目标声明的表和字段更新，当前配置中目标未声明的 MCP、审批、通知等内容保留。
 
-为了让同一会话能在 API 与 ChatGPT 之间继续，切换和 `codex-sync` 会扫描原生 `sessions/` 与 `archived_sessions/` 下的 `rollout-*.jsonl`，只把首条 `session_meta.payload.model_provider` 改成目标配置的 Provider。其余会话记录、顺序、附件和目录结构保持不变；写入失败时恢复本轮已经修改的文件。`codex-sync` 同时保存 Codex 使用过程中可能刷新的 token 和当前受管理配置。
+为了让同一会话能在 API 与 ChatGPT 之间继续，切换和 `codex-sync` 会扫描原生 `sessions/` 与 `archived_sessions/` 下的 `rollout-*.jsonl`，把首条 `session_meta.payload.model_provider` 改成目标配置的 Provider；如果发现权威 `state_5.sqlite`，还会在事务中同步 `threads.model_provider`。其余会话记录、顺序、附件和目录结构保持不变；写入失败时回滚本轮已经修改的 rollout 和 SQLite。`codex-sync` 同时保存 Codex 使用过程中可能刷新的 token 和当前受管理配置。
 
 ## 用户数据与卸载
 

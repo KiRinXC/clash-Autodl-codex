@@ -380,10 +380,9 @@ codex_write_api_source() {
 }
 
 codex_prepare_profile_config() {
-  local profile="$1" source="$2" output="$3" has_provider="false" provider
+  local profile="$1" source="$2" output="$3" has_provider="false"
   case "$profile" in api | chatgpt) ;; *) return 1 ;; esac
   [ -s "$source" ] && grep -Eq '^[[:space:]]*model_provider[[:space:]]*=' "$source" && has_provider="true"
-  provider="$(codex_config_model_provider "$source")"
   {
     printf '%s\n' 'cli_auth_credentials_store = "file"'
     printf 'forced_login_method = "%s"\n' "$profile"
@@ -391,20 +390,14 @@ codex_prepare_profile_config() {
       printf '%s\n' 'model_provider = "openai"'
     fi
     if [ -s "$source" ]; then
-      codex_profile_managed_top_lines "$source" | awk -v profile="$profile" '
+      awk -v profile="$profile" '
+        BEGIN { in_table = 0 }
+        /^[[:space:]]*\[/ { in_table = 1 }
+        !in_table && /^[[:space:]]*api_key[[:space:]]*=/ { next }
         /^[[:space:]]*(cli_auth_credentials_store|forced_login_method|sqlite_home)[[:space:]]*=/ { next }
         profile == "api" && /^[[:space:]]*forced_chatgpt_workspace_id[[:space:]]*=/ { next }
         { print }
-      '
-      if [ "$provider" != openai ] && [ "$provider" != ollama ] && [ "$provider" != lmstudio ] &&
-        codex_config_has_table_prefix "$source" "model_providers.$provider"; then
-        printf '\n'
-        codex_extract_table_prefix "$source" "model_providers.$provider"
-      fi
-      if codex_config_has_table_prefix "$source" sandbox_workspace_write; then
-        printf '\n'
-        codex_extract_table_prefix "$source" sandbox_workspace_write
-      fi
+      ' "$source"
     fi
   } > "$output"
 }
@@ -414,7 +407,8 @@ codex_profile_managed_top_lines() {
   awk '
     BEGIN { in_table = 0 }
     /^[[:space:]]*\[/ { in_table = 1 }
-    !in_table && /^[[:space:]]*(cli_auth_credentials_store|forced_login_method|forced_chatgpt_workspace_id|model_provider|model|review_model|model_reasoning_effort|model_reasoning_summary|model_verbosity|model_context_window|model_auto_compact_token_limit|model_auto_compact_token_limit_scope|openai_base_url|chatgpt_base_url)[[:space:]]*=/ { print }
+    !in_table && /^[[:space:]]*[A-Za-z0-9_.-]+[[:space:]]*=/ &&
+      !/^[[:space:]]*(api_key|sqlite_home)[[:space:]]*=/ { print }
   ' "$source"
 }
 
@@ -437,40 +431,64 @@ codex_config_has_table_prefix() {
 
 codex_merge_profile_config() {
   local target_config="$1" live_config="$2" output="$3" previous_config="${4:-}"
-  local target_provider previous_provider managed_lines managed_keys stripped target_sandbox
+  local target_provider previous_provider managed_lines managed_keys stripped table_headers python_bin python_status helper
   target_provider="$(codex_config_model_provider "$target_config")"
   if [ -s "$previous_config" ]; then
     previous_provider="$(codex_config_model_provider "$previous_config")"
   else
     previous_provider="$(codex_config_model_provider "$live_config")"
   fi
+  helper="$CODEX_AUTODL_REPO_ROOT/lib/codex_toml_merge.py"
+  if [ -f "$helper" ] && python_bin="$(python_command 2>/dev/null)"; then
+    if "$python_bin" "$helper" "$target_config" "$live_config" "$output"; then
+      python_status=0
+    else
+      python_status="$?"
+    fi
+    if [ "$python_status" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$python_status" -ne 2 ]; then
+      log_error "config.toml 递归合并失败；原生配置未修改"
+      return 1
+    fi
+  fi
   managed_lines="$(mktemp)"
   managed_keys="$(mktemp)"
   stripped="$(mktemp)"
   codex_profile_managed_top_lines "$target_config" > "$managed_lines"
   awk -F= '{ key=$1; gsub(/[[:space:]]/, "", key); if (key != "") print key }' "$managed_lines" > "$managed_keys"
-  target_sandbox="false"
-  codex_config_has_table_prefix "$target_config" sandbox_workspace_write && target_sandbox="true"
+  table_headers="$(mktemp)"
+  awk '/^[[:space:]]*\[/ { line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); print line }' \
+    "$target_config" > "$table_headers"
 
   if [ -s "$live_config" ]; then
-    awk -v keys_file="$managed_keys" -v old_provider="$previous_provider" \
-      -v new_provider="$target_provider" -v replace_sandbox="$target_sandbox" '
+    awk -v keys_file="$managed_keys" -v table_file="$table_headers" -v old_provider="$previous_provider" \
+      -v new_provider="$target_provider" '
       function trim(value) { sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
       function provider_header(header, provider) {
         if (provider == "" || provider == "openai" || provider == "ollama" || provider == "lmstudio") return 0
         return header == "[model_providers." provider "]" || index(header, "[model_providers." provider ".") == 1
       }
+      function target_table(header, position) {
+        for (position in tables) {
+          if (header == tables[position] || index(header, tables[position] ".") == 1) return 1
+        }
+        return 0
+      }
       BEGIN {
         while ((getline key < keys_file) > 0) replace_key[key] = 1
         close(keys_file)
+        table_count = 0
+        while ((getline header < table_file) > 0) tables[++table_count] = header
+        close(table_file)
         in_table = 0
         skip_table = 0
       }
       /^[[:space:]]*\[/ {
         in_table = 1
         header = trim($0)
-        skip_table = provider_header(header, old_provider) || provider_header(header, new_provider)
-        if (replace_sandbox == "true" && (header == "[sandbox_workspace_write]" || index(header, "[sandbox_workspace_write.") == 1)) skip_table = 1
+        skip_table = provider_header(header, old_provider) || provider_header(header, new_provider) || target_table(header)
         if (skip_table) next
       }
       skip_table { next }
@@ -478,7 +496,11 @@ codex_merge_profile_config() {
         key = $0
         sub(/[[:space:]]*=.*/, "", key)
         gsub(/[[:space:]]/, "", key)
-        if (key == "sqlite_home" || replace_key[key]) next
+        if ((key == "forced_login_method" || key == "cli_auth_credentials_store" ||
+          key == "forced_chatgpt_workspace_id" || key == "openai_base_url" ||
+          key == "chatgpt_base_url" || key == "experimental_realtime_ws_base_url" ||
+          key == "apps_mcp_product_sku" || key == "oss_provider") && !replace_key[key]) next
+        if (replace_key[key]) next
       }
       { print }
     ' "$live_config" > "$stripped"
@@ -489,18 +511,12 @@ codex_merge_profile_config() {
   {
     cat "$managed_lines"
     if [ -s "$stripped" ]; then printf '\n'; cat "$stripped"; fi
-    if [ "$target_provider" != openai ] && [ "$target_provider" != ollama ] && [ "$target_provider" != lmstudio ]; then
-      if codex_config_has_table_prefix "$target_config" "model_providers.$target_provider"; then
-        printf '\n'
-        codex_extract_table_prefix "$target_config" "model_providers.$target_provider"
-      fi
-    fi
-    if [ "$target_sandbox" = true ]; then
+    if [ -s "$table_headers" ]; then
       printf '\n'
-      codex_extract_table_prefix "$target_config" sandbox_workspace_write
+      awk 'started || /^[[:space:]]*\[/ { started = 1; if (started) print }' "$target_config"
     fi
   } > "$output"
-  rm -f "$managed_lines" "$managed_keys" "$stripped"
+  rm -f "$managed_lines" "$managed_keys" "$stripped" "$table_headers"
 }
 
 replace_codex_profile_dir() {
@@ -746,10 +762,10 @@ apply_codex_api_source() {
     target_provider="$(codex_config_model_provider "$pending/config.toml")"
   fi
   if [ "$status" -eq 0 ]; then
-    replace_codex_profile_dir api "$pending" || status=1
+    codex_rewrite_native_session_providers "$target_provider" || status=1
   fi
   if [ "$status" -eq 0 ]; then
-    codex_rewrite_native_session_providers "$target_provider" || status=1
+    replace_codex_profile_dir api "$pending" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     save_codex_active_auth api
@@ -856,10 +872,10 @@ configure_codex_chatgpt_profile() {
   if [ "$status" -eq 0 ]; then
     target_provider="$(codex_config_model_provider "$pending/config.toml")"
   fi
-  if [ "$status" -eq 0 ]; then replace_codex_profile_dir chatgpt "$pending" || status=1; fi
   if [ "$status" -eq 0 ]; then
     codex_rewrite_native_session_providers "$target_provider" || status=1
   fi
+  if [ "$status" -eq 0 ]; then replace_codex_profile_dir chatgpt "$pending" || status=1; fi
   if [ "$status" -eq 0 ]; then
     save_codex_active_auth chatgpt
     codex_record_sync chatgpt
